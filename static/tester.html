@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Bot Tester</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f7f7f7;
+    }
+    h1, h3 {
+      margin-bottom: 10px;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input[type="text"] {
+      width: 420px;
+      max-width: 100%;
+      padding: 10px;
+      font-size: 14px;
+    }
+    button {
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    #chat {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .msg {
+      padding: 10px;
+      border: 1px solid #ccc;
+      background: white;
+      white-space: pre-wrap;
+    }
+    .msg.user {
+      background: #e8f4ff;
+    }
+    .msg.bot {
+      background: #f5f5f5;
+    }
+    .panel {
+      background: white;
+      border: 1px solid #ddd;
+      padding: 12px;
+      margin-top: 12px;
+    }
+    .buttons-wrap {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #fff;
+      border: 1px solid #ddd;
+      padding: 12px;
+      overflow: auto;
+    }
+    textarea {
+      width: 100%;
+      min-height: 90px;
+      padding: 10px;
+      box-sizing: border-box;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+    }
+    .muted {
+      color: #666;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Тестер бота</h1>
+
+  <div class="panel">
+    <div class="row">
+      <input id="q" type="text" placeholder="Введите вопрос">
+      <button id="sendBtn">Отправить</button>
+      <button id="resetBtn">Новая сессия</button>
+    </div>
+    <div class="muted" style="margin-top:8px;">
+      SID: <span id="sidView"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Диалог</h3>
+    <div id="chat"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Кнопки от бота</h3>
+    <div id="buttons" class="buttons-wrap"></div>
+  </div>
+
+  <div class="panel">
+    <h3>CTA</h3>
+    <div id="cta" class="buttons-wrap"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Видео</h3>
+    <div id="video"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Ситуация</h3>
+    <div id="situation"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Сырой JSON ответа</h3>
+    <pre id="raw"></pre>
+  </div>
+
+  <div class="panel">
+    <h3>Кандидаты retrieval</h3>
+    <pre id="debugCandidates"></pre>
+  </div>
+
+  <script>
+    let sid = "test_" + Date.now();
+
+    const qInput = document.getElementById("q");
+    const sendBtn = document.getElementById("sendBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const sidView = document.getElementById("sidView");
+
+    const chat = document.getElementById("chat");
+    const buttons = document.getElementById("buttons");
+    const cta = document.getElementById("cta");
+    const video = document.getElementById("video");
+    const situation = document.getElementById("situation");
+    const raw = document.getElementById("raw");
+    const debugCandidates = document.getElementById("debugCandidates");
+
+    function updateSidView() {
+      sidView.textContent = sid;
+    }
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.textContent = (role === "user" ? "Вы: " : "Бот: ") + (text || "");
+      chat.appendChild(div);
+      div.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    function clearDynamicBlocks() {
+      buttons.innerHTML = "";
+      cta.innerHTML = "";
+      video.innerHTML = "";
+      situation.innerHTML = "";
+    }
+
+    function renderButtons(list, title) {
+      if (!Array.isArray(list) || !list.length) return;
+
+      list.forEach(item => {
+        const btn = document.createElement("button");
+        btn.textContent = item.label || item.ref || title || "Кнопка";
+        btn.onclick = () => sendQuestion(item.label || "", item.ref || null);
+        buttons.appendChild(btn);
+      });
+    }
+
+    function renderCTA(ctaData) {
+      if (!ctaData) return;
+
+      const btn = document.createElement("button");
+      btn.textContent = ctaData.text || "CTA";
+      btn.onclick = () => {
+        addMessage("user", `[CTA] ${ctaData.text || "CTA"}`);
+      };
+      cta.appendChild(btn);
+    }
+
+    function renderVideo(data) {
+      video.innerHTML = "";
+
+      if (data && data.video && (data.video.title || data.video.url)) {
+        const wrap = document.createElement("div");
+
+        const btn = document.createElement("button");
+        btn.textContent = data.video.title || "Показать видео";
+        wrap.appendChild(btn);
+
+        if (data.video.url) {
+          const p = document.createElement("div");
+          p.style.marginTop = "8px";
+          p.textContent = "URL: " + data.video.url;
+          wrap.appendChild(p);
+        }
+
+        video.appendChild(wrap);
+        return;
+      }
+
+      video.textContent = "Пока заглушка: здесь позже покажем видео-блок, когда добавим видео-поле в ответ.";
+    }
+
+    function renderSituation(data) {
+      situation.innerHTML = "";
+
+      const btn = document.createElement("button");
+      btn.textContent = "Поделиться своей ситуацией (тест)";
+      situation.appendChild(btn);
+
+      const box = document.createElement("div");
+      box.style.marginTop = "10px";
+
+      const textarea = document.createElement("textarea");
+      textarea.placeholder = "Например: давно нет зуба, боюсь боли, хочу понять сроки и цену";
+
+      const sendSituationBtn = document.createElement("button");
+      sendSituationBtn.textContent = "Отправить ситуацию";
+      sendSituationBtn.style.marginTop = "8px";
+
+      box.appendChild(textarea);
+      box.appendChild(sendSituationBtn);
+      situation.appendChild(box);
+
+      btn.onclick = () => {
+        textarea.focus();
+      };
+
+      sendSituationBtn.onclick = () => {
+        const text = textarea.value.trim();
+        if (!text) return;
+        sendQuestion(text, null);
+        textarea.value = "";
+      };
+    }
+
+    async function loadDebugCandidates(queryForDebug) {
+      try {
+        const debugUrl = `/__debug/retrieval?q=${encodeURIComponent(queryForDebug || "")}`;
+        const dbgRes = await fetch(debugUrl);
+        const dbgData = await dbgRes.json();
+        debugCandidates.textContent = JSON.stringify(dbgData, null, 2);
+      } catch (e) {
+        debugCandidates.textContent = "Не удалось загрузить retrieval candidates";
+      }
+    }
+
+    async function sendQuestion(customQ = null, customRef = null) {
+      const q = customQ ?? qInput.value.trim();
+      if (!q && !customRef) return;
+
+      if (q) {
+        addMessage("user", q);
+        qInput.value = "";
+      }
+
+      clearDynamicBlocks();
+      raw.textContent = "Загрузка...";
+      debugCandidates.textContent = "Загрузка candidates...";
+
+      const payload = { sid };
+      if (q) payload.q = q;
+      if (customRef) payload.ref = customRef;
+
+      try {
+        const res = await fetch("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+
+        addMessage("bot", data.answer || "(пустой ответ)");
+        raw.textContent = JSON.stringify(data, null, 2);
+
+        renderButtons(data.quick_replies || [], "Quick reply");
+
+        if (data.meta && Array.isArray(data.meta.followups)) {
+          renderButtons(data.meta.followups, "Follow-up");
+        }
+
+        renderCTA(data.cta || null);
+
+        renderVideo({
+          video: data.video || (data.conversion && data.conversion.video) || null
+        });
+
+        renderSituation(data);
+
+        await loadDebugCandidates(q || customRef || "");
+      } catch (e) {
+        addMessage("bot", "Ошибка при запросе к /ask");
+        raw.textContent = String(e);
+        debugCandidates.textContent = "Ошибка загрузки candidates";
+      }
+    }
+
+    sendBtn.addEventListener("click", () => sendQuestion());
+
+    qInput.addEventListener("keypress", (e) => {
+      if (e.key === "Enter") sendQuestion();
+    });
+
+    resetBtn.addEventListener("click", () => {
+      sid = "test_" + Date.now();
+      updateSidView();
+      chat.innerHTML = "";
+      clearDynamicBlocks();
+      raw.textContent = "";
+      debugCandidates.textContent = "";
+    });
+
+    updateSidView();
+  </script>
+</body>
+</html>

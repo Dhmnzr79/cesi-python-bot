@@ -1,0 +1,6 @@
+flask
+openai
+python-dotenv
+numpy
+python-frontmatter
+pyyaml

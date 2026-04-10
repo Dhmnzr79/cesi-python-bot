@@ -1,0 +1,88 @@
+---
+description: Flask RAG bot — архитектура, API, жёсткие запреты; всегда до работы с кодом
+alwaysApply: true
+---
+
+# Bot Project — Cursor Rules
+
+## Проект
+Flask + OpenAI RAG-бот. Multi-tenant через `client_id`.
+Контент: `md/{client_id}/`. Индексы: `data/{client_id}/`.
+
+---
+
+## Структура файлов — не нарушать
+
+```
+app.py          → только Flask-роуты, никакой логики
+retriever.py    → embed, retrieve, rerank
+llm.py          → промпты и вызовы OpenAI
+session.py      → весь session state
+policy.py       → детерминированные правила (без LLM)
+ux_builder.py   → только build_response()
+lead_service.py → валидация лида, webhook → n8n
+config.py       → все константы и пути
+```
+
+---
+
+## Жёсткие запреты
+
+- НЕ добавлять логику в `app.py` — только роуты
+- НЕ вызывать OpenAI вне `llm.py` и `retriever.py`
+- НЕ принимать бизнес-решения в LLM — только в `policy.py`
+- НЕ дублировать блоки кода — повторение → отдельная функция
+- НЕ использовать `print()` — только `log_json(logger, ...)`
+- НЕ хардкодить модели, пути, строки — всё в `config.py`
+- НЕ использовать `except: pass` — всегда логировать ошибку
+- НЕ создавать новые файлы без явного запроса
+- НЕ переписывать рабочий код если задача не требует
+
+---
+
+## Обязательно в каждом запросе
+
+```python
+# Валидация client_id — первое в каждом роуте
+client_id = data.get("client_id", "").strip()
+if client_id not in ALLOWED_CLIENTS:
+    return jsonify({"error": "unknown_client"}), 403
+
+# Секреты — только из .env
+os.getenv("OPENAI_API_KEY")  # не строкой в коде
+
+# Логи — структурированно с client_id и sid
+log_json(logger, "event", client_id=client_id, sid=sid, ...)
+
+# Ошибки — generic для пользователя, детали в лог
+logger.exception("failed", extra={"q": q[:100]})
+return jsonify({"answer": "Не удалось ответить."}), 200
+```
+
+---
+
+## API-контракт — не менять структуру
+
+```json
+// Запрос
+{ "q": "...", "ref": "file.md#section", "sid": "uuid", "client_id": "..." }
+
+// Ответ — всегда через build_response()
+{
+  "answer": "...",
+  "followups": [{ "label": "...", "ref": "file.md#section" }],
+  "cta": { "text": "...", "action": "booking" },
+  "video": { "title": "...", "url": "..." },
+  "situation": { "show": true },
+  "meta": { "file": "...", "score": 0.87, "turn_count": 2, "sid": "...", "client_id": "..." }
+}
+```
+
+---
+
+## Перед тем как писать код
+
+1. В какой файл идёт изменение?
+2. Не нарушает ли API-контракт?
+3. Не дублирует ли существующую функцию?
+4. Передан ли `client_id` если функция работает с данными клиента?

@@ -1,0 +1,26 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Индекс и сессии (пересобираются локально)
+data/embeddings.npy
+data/sessions/
+
+# Локальные логи
+logs/*.jsonl
+
+# Резервные копии редактора
+.history/
+
+.DS_Store
+Thumbs.db
