@@ -87,6 +87,8 @@ def main():
                 "doc": doc_id,
                 "file": os.path.basename(path),
                 "topic": meta.get("topic"),
+                "doc_type": meta.get("doc_type"),
+                "subtype": meta.get("subtype"),
                 "verbatim": bool(meta.get("verbatim", False)),
                 "preferred_format": meta.get("preferred_format", []),
                 "cta_action": meta.get("cta_action"),

@@ -15,6 +15,8 @@ build/
 # Индекс и сессии (пересобираются локально)
 data/embeddings.npy
 data/sessions/
+data/bot.db
+data/bot.db-*
 
 # Локальные логи
 logs/*.jsonl
