@@ -59,7 +59,7 @@ def extract_id_from_heading(txt: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def get_chunk_by_ref(ref: str) -> dict | None:
+def get_chunk_by_ref(ref: str, *, client_id: str | None = None) -> dict | None:
     if not ref or "#" not in ref:
         return None
     fname, anchor = ref.split("#", 1)
@@ -67,11 +67,17 @@ def get_chunk_by_ref(ref: str) -> dict | None:
     a = (anchor or "").strip().lower()
     corpus = load_corpus_if_needed()
     cands = [ch for ch in corpus if os.path.basename(ch.get("file", "") or "") == base]
+    if client_id:
+        client_cands = [ch for ch in cands if (ch.get("client_id") or "") == client_id]
+        if not client_cands:
+            return None
+        cands = client_cands
     if not cands:
         return None
-    if a in ("overview", "", None):
+    if a in ("overview", "korotko", "", None):
         for ch in cands:
-            if not ch.get("h2_id") and not ch.get("h3_id"):
+            h3_id = (ch.get("h3_id") or "").strip().lower()
+            if (not ch.get("h2_id") and not ch.get("h3_id")) or h3_id in {"overview", "korotko"}:
                 ch["_score"] = 1.0
                 return ch
         ch = cands[0]
@@ -189,12 +195,13 @@ def chunk_doc_type(item: Any) -> str | None:
     except Exception:
         pass
     if isinstance(item, dict):
-        dt = item.get("doc_type")
+        dt = item.get("doc_type") or item.get("topic")
         if dt:
             return dt
         base = os.path.basename(item.get("file") or "")
         if base:
-            return (get_doc_meta(base) or {}).get("doc_type")
+            fm = get_doc_meta(base, client_id=item.get("client_id")) or {}
+            return fm.get("doc_type") or fm.get("topic")
     return None
 
 
@@ -238,9 +245,10 @@ def chunk_info(ch: dict, sc: float | None = None) -> dict:
         subtype = meta.get("subtype")
 
     doc_base = os.path.basename(doc) if doc else None
+    ch_client_id = ch.get("client_id") if isinstance(ch, dict) else None
     full_md_path = None
     if doc_base:
-        full_md_path = get_doc_path(doc_base)
+        full_md_path = get_doc_path(doc_base, client_id=ch_client_id)
     if not full_md_path:
         guess = doc if os.path.exists(doc or "") else os.path.join("md", doc_base or "")
         full_md_path = guess if os.path.exists(guess) else None
@@ -251,7 +259,7 @@ def chunk_info(ch: dict, sc: float | None = None) -> dict:
         h3 = h3 or h3_guess
 
     doc_base = os.path.basename(doc) if doc else None
-    fm = get_doc_meta(doc_base) if doc_base else {}
+    fm = get_doc_meta(doc_base, client_id=ch_client_id) if doc_base else {}
     if not doc_type:
         doc_type = fm.get("doc_type")
     if not subtype:
@@ -272,7 +280,7 @@ def chunk_info(ch: dict, sc: float | None = None) -> dict:
 def chunk_is_overview(c: dict) -> bool:
     h2 = (c.get("h2_id") or "").strip().lower()
     h3 = (c.get("h3_id") or "").strip().lower()
-    return (not h2 and not h3) or h2 == "overview" or h3 == "overview"
+    return (not h2 and not h3) or h2 in {"overview", "korotko"} or h3 in {"overview", "korotko"}
 
 
 def broad_query_detect(q: str) -> bool:
@@ -304,7 +312,7 @@ def embed_q(q: str) -> np.ndarray:
     return v
 
 
-def retrieve(q: str, topk: int = 4) -> list:
+def retrieve(q: str, topk: int = 4, *, client_id: str | None = None) -> list:
     v = embed_q(q)
     sims = EMB @ v
     idx = np.argsort(-sims)[: max(topk, 8)]
@@ -312,6 +320,8 @@ def retrieve(q: str, topk: int = 4) -> list:
     corpus = load_corpus_if_needed()
     for i in idx:
         c = corpus[int(i)]
+        if client_id and c.get("client_id") != client_id:
+            continue
         key = (c["file"], c.get("h2_id") or c.get("h2"), c.get("h3_id") or c.get("h3"))
         if key in seen:
             continue

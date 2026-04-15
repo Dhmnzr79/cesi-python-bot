@@ -8,6 +8,9 @@ aliases:
   - "этапы имплантации зубов"
   - "как ставят имплант зуба поэтапно"
 
+suggest_refs:
+  - { label: "Цены на импланты", ref: "implantation__pricing__implants.md#korotko" }
+
 cta_text: "Обсудить на консультации"
 cta_action: lead
 

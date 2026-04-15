@@ -12,6 +12,7 @@ from datetime import datetime
 from config import DATA_DIR, MAX_IDLE_SEC, MAX_TURNS, SQLITE_PATH
 
 PHONE_RX = re.compile(r"(?:\+7|8)?[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-()]?\d{2}[\s\-()]?\d{2}")
+YES_RX = re.compile(r"^(да|ага|угу|ok|ок|хорошо|давай|хочу|расскажу)\W*$", re.I)
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
@@ -43,6 +44,8 @@ def _fresh_defaults() -> dict:
         "hist": deque(maxlen=MAX_TURNS * 2),
         "profile": {},
         "ts": time.time(),
+        "session_turn_count": 0,
+        "current_doc_id": None,
         "last_doc_key": None,
         "last_empathy_at": None,
         "turn_count": 0,
@@ -50,8 +53,10 @@ def _fresh_defaults() -> dict:
         "last_offer_type": None,
         "last_presented_buttons": [],
         "situation_pending": False,
-        "lead_intent": None,
+        "situation_note": "",
+        "lead_intent": "none",
         "shown_cta_topics": [],
+        "topic_state": {},
     }
 
 
@@ -114,6 +119,7 @@ def mem_add_user(session_id: str, text: str) -> None:
         st = mem_get(session_id)
         st["hist"].append({"role": "user", "content": text})
         st["turn_count"] = int(st.get("turn_count") or 0) + 1
+        st["session_turn_count"] = int(st.get("session_turn_count") or 0) + 1
         m = PHONE_RX.search(text)
         if m:
             st["profile"]["phone"] = m.group().replace(" ", "")
@@ -177,7 +183,10 @@ def record_last_bot_payload(session_id: str, payload: dict) -> None:
             if isinstance(x, dict):
                 buttons.append({"label": x.get("label"), "ref": x.get("ref")})
         st["last_presented_buttons"] = buttons[:6]
-        if cta:
+        if (payload.get("situation") or {}).get("show"):
+            st["last_bot_action"] = "offered_situation"
+            st["last_offer_type"] = "situation"
+        elif cta:
             st["last_bot_action"] = "offered_cta"
             st["last_offer_type"] = "cta"
         elif fup:
@@ -189,4 +198,208 @@ def record_last_bot_payload(session_id: str, payload: dict) -> None:
         else:
             st["last_bot_action"] = "none"
             st["last_offer_type"] = None
+        _persist_unlocked(session_id, st)
+
+
+def is_active_lead_flow(session_state: dict) -> bool:
+    return (session_state or {}).get("lead_intent") in {
+        "collecting_name",
+        "collecting_phone",
+    }
+
+
+def _topic_state_container(st: dict) -> dict:
+    ts = st.get("topic_state")
+    if not isinstance(ts, dict):
+        ts = {}
+        st["topic_state"] = ts
+    return ts
+
+
+def get_topic_state(session_id: str, doc_id: str) -> dict:
+    st = mem_get(session_id)
+    ts = _topic_state_container(st)
+    topic = ts.get(doc_id) or {}
+    return {
+        "doc_turn_count": int(topic.get("doc_turn_count") or 0),
+        "covered_h3_ids": list(topic.get("covered_h3_ids") or []),
+        "video_shown": bool(topic.get("video_shown", False)),
+        "video_pending": bool(topic.get("video_pending", False)),
+        "situation_offered": bool(topic.get("situation_offered", False)),
+        "refs_deferred": list(topic.get("refs_deferred") or []),
+        "cta_shown": bool(topic.get("cta_shown", False)),
+    }
+
+
+def _upsert_topic_state(st: dict, doc_id: str, patch: dict) -> None:
+    ts = _topic_state_container(st)
+    cur = ts.get(doc_id) or {
+        "doc_turn_count": 0,
+        "covered_h3_ids": [],
+        "video_shown": False,
+        "video_pending": False,
+        "situation_offered": False,
+        "refs_deferred": [],
+        "cta_shown": False,
+    }
+    cur.update(patch or {})
+    ts[doc_id] = cur
+
+
+def set_current_doc(session_id: str, doc_id: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["current_doc_id"] = doc_id
+        _persist_unlocked(session_id, st)
+
+
+def mark_h3_covered(session_id: str, doc_id: str, h3_id: str) -> None:
+    if not doc_id or not h3_id:
+        return
+    with _lock:
+        st = mem_get(session_id)
+        cur = get_topic_state(session_id, doc_id)
+        covered = list(cur.get("covered_h3_ids") or [])
+        if h3_id not in covered:
+            covered.append(h3_id)
+        _upsert_topic_state(st, doc_id, {"covered_h3_ids": covered})
+        _persist_unlocked(session_id, st)
+
+
+def increment_doc_turn_if_contentful(
+    session_id: str,
+    doc_id: str,
+    *,
+    contentful: bool,
+    is_low_score: bool,
+    is_error: bool,
+    lead_flow_active: bool,
+) -> None:
+    if not doc_id:
+        return
+    if not contentful or is_low_score or is_error or lead_flow_active:
+        return
+    with _lock:
+        st = mem_get(session_id)
+        cur = get_topic_state(session_id, doc_id)
+        _upsert_topic_state(
+            st, doc_id, {"doc_turn_count": int(cur.get("doc_turn_count") or 0) + 1}
+        )
+        _persist_unlocked(session_id, st)
+
+
+def mark_video_pending(session_id: str, doc_id: str, pending: bool = True) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        _upsert_topic_state(st, doc_id, {"video_pending": bool(pending)})
+        _persist_unlocked(session_id, st)
+
+
+def mark_video_shown(session_id: str, doc_id: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        _upsert_topic_state(st, doc_id, {"video_shown": True, "video_pending": False})
+        _persist_unlocked(session_id, st)
+
+
+def mark_situation_offered(session_id: str, doc_id: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        _upsert_topic_state(st, doc_id, {"situation_offered": True})
+        _persist_unlocked(session_id, st)
+
+
+def set_cta_shown(session_id: str, doc_id: str, shown: bool = True) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        # analytics/memory flag only; not a hard blocker
+        _upsert_topic_state(st, doc_id, {"cta_shown": bool(shown)})
+        _persist_unlocked(session_id, st)
+
+
+def defer_refs(session_id: str, doc_id: str, refs: list[dict]) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        cur = get_topic_state(session_id, doc_id)
+        existing = list(cur.get("refs_deferred") or [])
+        for r in refs or []:
+            if isinstance(r, dict) and r.get("ref") and r not in existing:
+                existing.append(r)
+        _upsert_topic_state(st, doc_id, {"refs_deferred": existing})
+        _persist_unlocked(session_id, st)
+
+
+def pop_deferred_ref(session_id: str, doc_id: str) -> dict | None:
+    with _lock:
+        st = mem_get(session_id)
+        cur = get_topic_state(session_id, doc_id)
+        refs = list(cur.get("refs_deferred") or [])
+        if not refs:
+            return None
+        first = refs[0]
+        _upsert_topic_state(st, doc_id, {"refs_deferred": refs[1:]})
+        _persist_unlocked(session_id, st)
+        return first
+
+
+def set_situation_pending(session_id: str, pending: bool = True) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["situation_pending"] = bool(pending)
+        _persist_unlocked(session_id, st)
+
+
+def set_situation_note(session_id: str, note: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["situation_note"] = (note or "").strip()
+        _persist_unlocked(session_id, st)
+
+
+def set_lead_intent(session_id: str, intent: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["lead_intent"] = intent
+        _persist_unlocked(session_id, st)
+
+
+def parse_yes(text: str) -> bool:
+    return bool(YES_RX.search((text or "").strip()))
+
+
+def extract_name(text: str) -> str | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    m = re.search(r"(?:меня зовут|я)\s+([а-яa-z\-]{2,})", s, re.I)
+    if m:
+        return m.group(1).capitalize()
+    m2 = re.match(r"^[а-яa-z\-]{2,}$", s, re.I)
+    if m2:
+        return m2.group(0).capitalize()
+    return None
+
+
+def extract_phone(text: str) -> str | None:
+    m = PHONE_RX.search(text or "")
+    if not m:
+        return None
+    raw = re.sub(r"\D", "", m.group(0))
+    if len(raw) == 11 and raw.startswith("8"):
+        raw = "7" + raw[1:]
+    if len(raw) == 10:
+        raw = "7" + raw
+    if len(raw) != 11:
+        return None
+    return f"+{raw}"
+
+
+def update_profile(session_id: str, **fields) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        prof = dict(st.get("profile") or {})
+        for k, v in (fields or {}).items():
+            if v:
+                prof[k] = v
+        st["profile"] = prof
         _persist_unlocked(session_id, st)

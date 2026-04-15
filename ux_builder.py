@@ -15,14 +15,14 @@ def get_chunk_ids(chunk: dict) -> tuple:
 def is_overview_by_ids(h2_id, h3_id) -> bool:
     h2 = (h2_id or "").strip().lower()
     h3 = (h3_id or "").strip().lower()
-    return (not h2 and not h3) or (h2 == "overview") or (h3 == "overview")
+    return (not h2 and not h3) or (h2 in {"overview", "korotko"}) or (h3 in {"overview", "korotko"})
 
 
-def heading_label(md_file: str, sect_id: str) -> str:
+def heading_label(md_file: str, sect_id: str, client_id: str | None = None) -> str:
     if not md_file or not sect_id:
         return (sect_id or "").replace("-", " ").capitalize()
     try:
-        path = get_doc_path(os.path.basename(md_file)) or md_file
+        path = get_doc_path(os.path.basename(md_file), client_id=client_id) or md_file
         with open(path, "r", encoding="utf-8") as f:
             txt = f.read()
         rx3 = re.compile(
@@ -60,18 +60,28 @@ def build_quick_refs(meta: dict, md_file: str, current_h2_id: str, current_h3_id
     return out
 
 
-def build_followups(meta: dict, md_file: str, current_h2_id: str, current_h3_id: str) -> list:
+def build_followups(
+    meta: dict,
+    md_file: str,
+    current_h2_id: str,
+    current_h3_id: str,
+    covered_h3_ids: list[str] | None = None,
+    client_id: str | None = None,
+) -> list:
     out = []
+    covered = {str(x).strip().lower() for x in (covered_h3_ids or []) if x}
     for s in meta.get("suggest_h3") or []:
         h_id = s if isinstance(s, str) else (s.get("h3_id") or s.get("id"))
         if not h_id:
+            continue
+        if str(h_id).lower() in covered:
             continue
         if str(h_id).lower() in {
             str(current_h2_id or "").lower(),
             str(current_h3_id or "").lower(),
         }:
             continue
-        label = heading_label(md_file, h_id)
+        label = heading_label(md_file, h_id, client_id=client_id)
         out.append({"label": label, "ref": f"{os.path.basename(md_file)}#{h_id}"})
     return out
 
@@ -119,8 +129,9 @@ def build_ask_response(
     sid: str,
     profile: dict,
     client_id: str | None = None,
+    topic_state: dict | None = None,
 ) -> dict:
-    """Единая структура успешного ответа /ask (как раньше: quick_replies + meta.followups)."""
+    """Единая структура успешного ответа /ask."""
     md_file = top.get("file")
     h2_id, h3_id = get_chunk_ids(top)
     h2_val = top.get("h2") or top.get("h2_id")
@@ -128,8 +139,15 @@ def build_ask_response(
     is_overview = is_overview_by_ids(h2_id, h3_id)
 
     quick_refs = build_quick_refs(meta, md_file, h2_id, h3_id)
-    fups_full = build_followups(meta, md_file, h2_id, h3_id)
-    followups = fups_full[:1] if is_overview else []
+    fups_full = build_followups(
+        meta,
+        md_file,
+        h2_id,
+        h3_id,
+        covered_h3_ids=(topic_state or {}).get("covered_h3_ids") or [],
+        client_id=client_id,
+    )
+    followups = fups_full[:2]
 
     cta_btn = build_cta(meta)
     quick_refs = dedup_refs_vs_cta(quick_refs, cta_btn)
@@ -160,9 +178,41 @@ def build_ask_response(
         "answer": answer,
         "quick_replies": quick_refs,
         "cta": cta_btn,
+        "video": None,
+        "situation": {"show": False},
         "offer": pick_relevant_offer(meta),
         "meta": meta_out,
     }
+
+
+def normalize_policy_payload(payload: dict) -> dict:
+    """UI-level limiter: enforce screen limits; do not invent business logic."""
+    dropped = []
+    if not isinstance(payload, dict):
+        return payload
+
+    meta = payload.setdefault("meta", {})
+    followups = list(meta.get("followups") or [])
+    if len(followups) > 2:
+        dropped.append("followups_over_limit")
+        meta["followups"] = followups[:2]
+
+    refs = list(payload.get("quick_replies") or [])
+    if len(refs) > 1:
+        dropped.append("suggest_refs_over_limit")
+        payload["quick_replies"] = refs[:1]
+
+    if payload.get("video") and (payload.get("situation") or {}).get("show"):
+        dropped.append("video_with_situation_conflict")
+        payload["situation"] = {"show": False}
+
+    if len(meta.get("followups") or []) >= 2 and payload.get("quick_replies"):
+        dropped.append("refs_with_two_followups_conflict")
+        payload["quick_replies"] = []
+
+    if dropped:
+        meta["ui_dropped"] = dropped
+    return payload
 
 
 def empty_question_response() -> dict:

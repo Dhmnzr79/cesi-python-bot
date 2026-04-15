@@ -27,7 +27,7 @@ BROAD_QUERY_MAX_WORDS = int(os.getenv("BROAD_QUERY_MAX_WORDS", "5"))
 
 # --- Ответ при низком score ---
 DEFAULT_CTA_TEXT = os.getenv("DEFAULT_CTA_TEXT", "Записаться на консультацию")
-DEFAULT_CTA_ACTION = os.getenv("DEFAULT_CTA_ACTION", "booking")
+DEFAULT_CTA_ACTION = os.getenv("DEFAULT_CTA_ACTION", "lead")
 
 # --- LLM: JSON-ответ { "answer": "..." } ---
 CHAT_JSON_MODE = os.getenv("CHAT_JSON_MODE", "1").lower() in ("1", "true", "yes")

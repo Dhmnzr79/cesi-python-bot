@@ -84,6 +84,7 @@
   <div class="panel">
     <div class="row">
       <input id="q" type="text" placeholder="Введите вопрос">
+      <input id="clientId" type="text" placeholder="client_id (например, default)">
       <button id="sendBtn">Отправить</button>
       <button id="resetBtn">Новая сессия</button>
     </div>
@@ -134,6 +135,7 @@
     const sendBtn = document.getElementById("sendBtn");
     const resetBtn = document.getElementById("resetBtn");
     const sidView = document.getElementById("sidView");
+    const clientIdInput = document.getElementById("clientId");
 
     const chat = document.getElementById("chat");
     const buttons = document.getElementById("buttons");
@@ -168,7 +170,10 @@
       list.forEach(item => {
         const btn = document.createElement("button");
         btn.textContent = item.label || item.ref || title || "Кнопка";
-        btn.onclick = () => sendQuestion(item.label || "", item.ref || null);
+        btn.onclick = () => sendAsk({
+          q: item.label || "",
+          ref: item.ref || null
+        });
         buttons.appendChild(btn);
       });
     }
@@ -180,6 +185,9 @@
       btn.textContent = ctaData.text || "CTA";
       btn.onclick = () => {
         addMessage("user", `[CTA] ${ctaData.text || "CTA"}`);
+        sendAsk({
+          cta_action: ctaData.action || "lead"
+        });
       };
       cta.appendChild(btn);
     }
@@ -211,8 +219,13 @@
     function renderSituation(data) {
       situation.innerHTML = "";
 
+      if (!data || !data.situation || data.situation.show !== true) {
+        situation.textContent = "Сейчас блок ситуации не предложен ботом.";
+        return;
+      }
+
       const btn = document.createElement("button");
-      btn.textContent = "Поделиться своей ситуацией (тест)";
+      btn.textContent = "Рассказать о ситуации";
       situation.appendChild(btn);
 
       const box = document.createElement("div");
@@ -228,15 +241,20 @@
       box.appendChild(textarea);
       box.appendChild(sendSituationBtn);
       situation.appendChild(box);
+      box.style.display = "none";
 
       btn.onclick = () => {
+        sendAsk({
+          situation_action: "start"
+        });
+        box.style.display = "block";
         textarea.focus();
       };
 
       sendSituationBtn.onclick = () => {
         const text = textarea.value.trim();
         if (!text) return;
-        sendQuestion(text, null);
+        sendAsk({ q: text });
         textarea.value = "";
       };
     }
@@ -252,9 +270,15 @@
       }
     }
 
-    async function sendQuestion(customQ = null, customRef = null) {
-      const q = customQ ?? qInput.value.trim();
-      if (!q && !customRef) return;
+    async function sendAsk(opts = {}) {
+      const q = opts.q ?? qInput.value.trim();
+      const ref = opts.ref ?? null;
+      const ctaAction = opts.cta_action ?? null;
+      const situationAction = opts.situation_action ?? null;
+      const action = opts.action ?? null;
+      const clientId = (clientIdInput.value || "").trim() || "default";
+
+      if (!q && !ref && !ctaAction && !situationAction && !action) return;
 
       if (q) {
         addMessage("user", q);
@@ -265,9 +289,12 @@
       raw.textContent = "Загрузка...";
       debugCandidates.textContent = "Загрузка candidates...";
 
-      const payload = { sid };
+      const payload = { sid, client_id: clientId };
       if (q) payload.q = q;
-      if (customRef) payload.ref = customRef;
+      if (ref) payload.ref = ref;
+      if (ctaAction) payload.cta_action = ctaAction;
+      if (situationAction) payload.situation_action = situationAction;
+      if (action) payload.action = action;
 
       try {
         const res = await fetch("/ask", {
@@ -295,7 +322,7 @@
 
         renderSituation(data);
 
-        await loadDebugCandidates(q || customRef || "");
+        await loadDebugCandidates(q || ref || "");
       } catch (e) {
         addMessage("bot", "Ошибка при запросе к /ask");
         raw.textContent = String(e);
@@ -303,10 +330,10 @@
       }
     }
 
-    sendBtn.addEventListener("click", () => sendQuestion());
+    sendBtn.addEventListener("click", () => sendAsk());
 
     qInput.addEventListener("keypress", (e) => {
-      if (e.key === "Enter") sendQuestion();
+      if (e.key === "Enter") sendAsk();
     });
 
     resetBtn.addEventListener("click", () => {
@@ -318,6 +345,7 @@
       debugCandidates.textContent = "";
     });
 
+    clientIdInput.value = "default";
     updateSidView();
   </script>
 </body>

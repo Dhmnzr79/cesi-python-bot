@@ -75,6 +75,8 @@ def main():
     for path in glob.glob("md/**/*.md", recursive=True):
         fm = frontmatter.load(path)
         meta = fm.metadata or {}
+        rel_parts = os.path.normpath(path).split(os.sep)
+        client_id = rel_parts[1] if len(rel_parts) > 2 else None
         followups = meta.get("followups") or []
         doc_id = meta.get("doc_id") or os.path.splitext(os.path.basename(path))[0]
         for ch in split_md_to_chunks(fm.content):
@@ -86,6 +88,7 @@ def main():
             item = {
                 "doc": doc_id,
                 "file": os.path.basename(path),
+                "client_id": client_id,
                 "topic": meta.get("topic"),
                 "doc_type": meta.get("doc_type"),
                 "subtype": meta.get("subtype"),
