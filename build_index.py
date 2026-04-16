@@ -1,6 +1,7 @@
 import os, json, re, glob, numpy as np, frontmatter
 from dotenv import load_dotenv
 from openai import OpenAI
+from config import DEFAULT_CLIENT_ID
 # --- logging (устойчиво) ---
 try:
     from logging_setup import log_json, setup_logging  # если есть твой модуль
@@ -76,7 +77,7 @@ def main():
         fm = frontmatter.load(path)
         meta = fm.metadata or {}
         rel_parts = os.path.normpath(path).split(os.sep)
-        client_id = rel_parts[1] if len(rel_parts) > 2 else None
+        client_id = rel_parts[1] if len(rel_parts) > 2 else DEFAULT_CLIENT_ID
         followups = meta.get("followups") or []
         doc_id = meta.get("doc_id") or os.path.splitext(os.path.basename(path))[0]
         for ch in split_md_to_chunks(fm.content):

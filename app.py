@@ -603,10 +603,13 @@ def ask():
 @app.get("/__debug/retrieval")
 def dbg():
     q = request.args.get("q", "")
-    c = retrieve(q, topk=5)
+    client_id = resolve_client_id(request.args.get("client_id"))
+    if client_id is None:
+        return jsonify({"error": "unknown_client"}), 403
+    c = retrieve(q, topk=5, client_id=client_id)
     for x in c:
         x.pop("text", None)
-    return jsonify({"q": q, "candidates": c})
+    return jsonify({"q": q, "client_id": client_id, "candidates": c})
 
 
 @app.get("/static/<path:path>")
