@@ -36,6 +36,8 @@ _CORPUS: list | None = None
 _RE_H2 = re.compile(r"^##\s+.*?\{#([a-z0-9\-]+)\}\s*$", re.I | re.M)
 _RE_H3 = re.compile(r"^###\s+.*?\{#([a-z0-9\-]+)\}\s*$", re.I | re.M)
 _SECTION_CACHE: dict[str, dict] = {}
+_EMB: np.ndarray | None = None
+_EMB_LOAD_ERROR: str | None = None
 
 
 def load_corpus_if_needed() -> list:
@@ -49,7 +51,19 @@ def load_corpus_if_needed() -> list:
     return _CORPUS
 
 
-EMB = np.load(EMB_PATH)
+def _get_embeddings() -> np.ndarray | None:
+    global _EMB, _EMB_LOAD_ERROR
+    if _EMB is not None:
+        return _EMB
+    if _EMB_LOAD_ERROR is not None:
+        return None
+    try:
+        _EMB = np.load(EMB_PATH)
+        return _EMB
+    except Exception as e:
+        _EMB_LOAD_ERROR = str(e)
+        log_json(logger, "embeddings_load_failed", emb_path=EMB_PATH, err=_EMB_LOAD_ERROR)
+        return None
 
 
 def extract_id_from_heading(txt: str) -> str | None:
@@ -582,8 +596,12 @@ def embed_q(q: str) -> np.ndarray:
 
 
 def retrieve(q: str, topk: int = 4, *, client_id: str | None = None) -> list:
+    emb = _get_embeddings()
+    if emb is None:
+        log_json(logger, "retrieval_skipped_no_embeddings", used_query=q, emb_path=EMB_PATH)
+        return []
     v = embed_q(q)
-    sims = EMB @ v
+    sims = emb @ v
     idx = np.argsort(-sims)[: max(topk, 8)]
     seen, out = set(), []
     corpus = load_corpus_if_needed()

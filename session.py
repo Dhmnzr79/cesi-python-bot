@@ -409,16 +409,75 @@ def parse_yes(text: str) -> bool:
     return bool(YES_RX.search((text or "").strip()))
 
 
+# Токены, которые нельзя принимать за имя после «я …» / однословный ответ.
+_LEAD_NAME_REJECT = frozenset(
+    {
+        "боюсь", "хочу", "переживаю", "переживал", "переживала", "беспокоюсь",
+        "думаю", "знаю", "понимаю", "слышал", "слышала", "видел", "видела",
+        "устал", "устала", "устали", "надеюсь", "сомневаюсь",
+        "хотел", "хотела", "хотели", "хотелось", "узнать", "узнаю", "спрашиваю",
+        "бы", "же", "не", "тоже", "также", "просто", "очень", "уже", "ещё",
+        "еще", "пока", "только", "да", "нет", "ок", "ага", "угу",
+        "хорошо", "ладно", "спасибо", "привет", "здравствуйте", "понятно",
+        "ясно", "конечно", "извините", "простите",
+    }
+)
+
+_NAME_TOKEN_RX = re.compile(r"^[А-ЯЁA-Za-zа-яё\-]{2,40}$", re.U)
+
+
+def _strip_lead_name_filler(s: str) -> str:
+    return re.sub(
+        r"^(?:[ауоыэи]+\s+|ну\s+|а\s+|э\s+|эм\s+)+",
+        "",
+        (s or "").strip(),
+        flags=re.I,
+    ).strip()
+
+
+def _token_ok_for_name(tok: str) -> bool:
+    t = (tok or "").strip()
+    if not t or not _NAME_TOKEN_RX.fullmatch(t):
+        return False
+    if t.lower() in _LEAD_NAME_REJECT:
+        return False
+    return True
+
+
 def extract_name(text: str) -> str | None:
-    s = (text or "").strip()
+    s0 = (text or "").strip()
+    if not s0:
+        return None
+    s = _strip_lead_name_filler(s0)
     if not s:
         return None
-    m = re.search(r"(?:меня зовут|я)\s+([а-яa-z\-]{2,})", s, re.I)
+
+    m = re.match(
+        r"^меня\s+зовут\s+"
+        r"([А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Za-zа-яё\-]+){0,2})\s*$",
+        s,
+        re.I | re.U,
+    )
     if m:
-        return m.group(1).capitalize()
-    m2 = re.match(r"^[а-яa-z\-]{2,}$", s, re.I)
-    if m2:
-        return m2.group(0).capitalize()
+        parts = m.group(1).split()
+        if not parts or not all(_token_ok_for_name(p) for p in parts):
+            return None
+        return " ".join(p[:1].upper() + p[1:].lower() if len(p) > 1 else p.capitalize() for p in parts)
+
+    m_ya = re.match(r"^я\s+([А-ЯЁA-Za-zа-яё\-]+)\s*$", s, re.I | re.U)
+    if m_ya:
+        tok = m_ya.group(1)
+        if not _token_ok_for_name(tok):
+            return None
+        t = tok
+        return (t[:1].upper() + t[1:].lower()) if len(t) > 1 else t.capitalize()
+
+    if re.fullmatch(r"[А-ЯЁA-Za-zа-яё\-]{2,40}", s, re.U):
+        if not _token_ok_for_name(s):
+            return None
+        t = s
+        return (t[:1].upper() + t[1:].lower()) if len(t) > 1 else t.capitalize()
+
     return None
 
 
