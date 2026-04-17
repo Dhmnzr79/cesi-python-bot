@@ -2,6 +2,8 @@
 from os.path import abspath, basename
 import os, re, yaml
 
+from config import DEFAULT_CLIENT_ID
+
 # front-matter между --- ... ---
 _FM_RE = re.compile(r'^---\s*\n(.*?)\n---\s*\n?', re.S)
 
@@ -67,10 +69,16 @@ _DOC_PATHS = {}  # basename -> абсолютный путь
 
 def get_doc_path(doc_name: str, client_id: str | None = None):
     global _DOC_PATHS, _DOC_META
-    if not _DOC_PATHS:          # <— добавь эти две строки
+    if not _DOC_PATHS:
         _DOC_META = load_doc_meta()
     if client_id:
-        return _DOC_PATHS.get((client_id, doc_name))
+        item = _DOC_PATHS.get((client_id, doc_name))
+        if item:
+            return item
+        # Single-client compatibility mode: keep root-level md/ files working
+        # for the default tenant until content is moved under md/{client_id}/.
+        if client_id == DEFAULT_CLIENT_ID:
+            return _DOC_PATHS.get(doc_name)
     return _DOC_PATHS.get(doc_name)
 
 def get_doc_meta(doc_name: str, client_id: str | None = None) -> dict:
@@ -88,5 +96,14 @@ def get_doc_meta(doc_name: str, client_id: str | None = None) -> dict:
                 continue
             if cand.get("client_id") == client_id and cand.get("doc_id") == wanted_doc_id:
                 return cand
+        if client_id == DEFAULT_CLIENT_ID:
+            item = _DOC_META.get(doc_name)
+            if item:
+                return item
+            for _, cand in _DOC_META.items():
+                if not isinstance(cand, dict):
+                    continue
+                if cand.get("client_id") is None and cand.get("doc_id") == wanted_doc_id:
+                    return cand
         return {}
     return _DOC_META.get(doc_name, {})

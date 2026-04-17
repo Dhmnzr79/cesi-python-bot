@@ -305,6 +305,275 @@ def prefer_overview_if_broad(cands: list, broad: bool) -> list:
     return cands
 
 
+def _norm_text(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\{#.*?\}", " ", s)
+    s = re.sub(r"[^\w\s\-]", " ", s, flags=re.U)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# Служебные слова для alias matching: сравниваем ядро запроса, не бытовую оболочку.
+_ALIAS_STOP_WORDS = frozenset(
+    {
+        "а",
+        "у",
+        "в",
+        "во",
+        "на",
+        "по",
+        "за",
+        "к",
+        "ко",
+        "с",
+        "со",
+        "о",
+        "об",
+        "от",
+        "до",
+        "из",
+        "при",
+        "про",
+        "без",
+        "для",
+        "над",
+        "под",
+        "вас",
+        "вам",
+        "нас",
+        "мне",
+        "меня",
+        "есть",
+        "ли",
+        "можно",
+        "нельзя",
+        "получить",
+        "получается",
+        "скажите",
+        "подскажите",
+        "расскажите",
+        "хочу",
+        "нужно",
+        "надо",
+        "будет",
+        "это",
+        "то",
+        "так",
+        "как",
+        "что",
+        "где",
+        "когда",
+        "почему",
+        "зачем",
+        "или",
+        "и",
+        "же",
+        "ли",
+        "бы",
+        "не",
+        "ни",
+        "уже",
+        "еще",
+        "ещё",
+        "только",
+        "лишь",
+        "очень",
+        "все",
+        "всё",
+        "там",
+        "тут",
+        "здесь",
+    }
+)
+
+
+def _core_tokens(text: str) -> list[str]:
+    """Токены смыслового ядра: без служебных слов, порядок сохраняется."""
+    qn = _norm_text(text)
+    out: list[str] = []
+    for t in qn.split():
+        if len(t) < 2:
+            continue
+        if t in _ALIAS_STOP_WORDS:
+            continue
+        out.append(t)
+    return out
+
+
+def _strong_core_tokens(core: list[str]) -> list[str]:
+    """«Сильные» токены: длина >= 3 или есть цифры (адрес, сумма)."""
+    return [t for t in core if len(t) >= 3 or any(ch.isdigit() for ch in t)]
+
+
+def _all_tokens_in_text(tokens: list[str], an: str) -> bool:
+    """Каждый токен — отдельное слово в тексте (границы по пробелам)."""
+    if not tokens:
+        return False
+    padded = f" {an} "
+    for t in tokens:
+        if len(t) < 2:
+            return False
+        if f" {t} " not in padded:
+            return False
+    return True
+
+
+def _heading_plain(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"^#{1,6}\s*", "", s)
+    return s
+
+
+def _chunk_alias_terms(ch: dict) -> list[str]:
+    if not isinstance(ch, dict):
+        return []
+    terms: list[str] = []
+    aliases = ch.get("aliases") or []
+    if isinstance(aliases, list):
+        for a in aliases:
+            if isinstance(a, str) and a.strip():
+                terms.append(a.strip())
+    h2 = _heading_plain(str(ch.get("h2") or ""))
+    h3 = _heading_plain(str(ch.get("h3") or ""))
+    h2_id = str(ch.get("h2_id") or "").strip()
+    h3_id = str(ch.get("h3_id") or "").strip()
+    if h2:
+        terms.append(h2)
+    if h3:
+        terms.append(h3)
+    if h2_id:
+        terms.append(h2_id.replace("-", " "))
+    if h3_id:
+        terms.append(h3_id.replace("-", " "))
+    return terms
+
+
+def alias_hit_score_for_chunk(q: str, ch: dict) -> float:
+    qn = _norm_text(q)
+    if not qn:
+        return 0.0
+    q_core = _core_tokens(q)
+    q_core_joint = " ".join(q_core) if q_core else ""
+    q_tokens = {t for t in qn.split() if len(t) >= 2}
+    q_core_set = {t for t in q_core if len(t) >= 2}
+    best = 0.0
+    for raw in _chunk_alias_terms(ch):
+        an = _norm_text(raw)
+        if not an or len(an) < 2:
+            continue
+        a_core = _core_tokens(raw)
+        a_core_joint = " ".join(a_core) if a_core else ""
+        a_core_set = {t for t in a_core if len(t) >= 2}
+
+        # --- Ядро: подстрока целиком (быстрый путь для «налоговый вычет» vs длинный alias) ---
+        if q_core_joint and len(q_core_joint) >= 4 and q_core_joint in an:
+            best = max(best, 0.92)
+        if a_core_joint and len(a_core_joint) >= 4 and a_core_joint in qn:
+            best = max(best, 0.92)
+
+        # --- Короткое точечное ядро: 2 «сильных» токена запроса оба есть в alias как слова ---
+        strong_q = _strong_core_tokens(q_core)
+        if len(strong_q) == 2 and _all_tokens_in_text(strong_q, an):
+            best = max(best, 0.9)
+        # Два любых токена ядра (после стоп-слов), если ядро ровно из двух слов ---
+        if len(q_core) == 2 and all(len(t) >= 2 for t in q_core) and _all_tokens_in_text(q_core, an):
+            best = max(best, 0.9)
+
+        # --- 2–3 токена ядра полностью покрыты alias-ядром (без требования почти полной фразы) ---
+        if 2 <= len(q_core) <= 3 and q_core_set and q_core_set.issubset(a_core_set):
+            best = max(best, 0.88 if len(q_core) == 3 else 0.9)
+
+        # --- Пересечение ядер (мягче, чем только полный qn) ---
+        if q_core_set and a_core_set:
+            inter_c = len(q_core_set & a_core_set)
+            if inter_c > 0:
+                q_cov_c = inter_c / max(len(q_core_set), 1)
+                if len(q_core_set) <= 3 and q_cov_c >= 0.67:
+                    best = max(best, 0.86)
+                elif q_cov_c >= 0.5:
+                    best = max(best, 0.8)
+
+        if qn == an:
+            best = max(best, 1.0)
+            continue
+        if qn in an or an in qn:
+            ratio = min(len(qn), len(an)) / max(len(qn), len(an))
+            best = max(best, 0.93 if ratio >= 0.85 else 0.82)
+            continue
+        a_tokens = {t for t in an.split() if len(t) >= 2}
+        if not q_tokens or not a_tokens:
+            continue
+        inter = len(q_tokens & a_tokens)
+        if inter == 0:
+            continue
+        overlap = inter / max(len(q_tokens), len(a_tokens))
+        q_cover = inter / max(len(q_tokens), 1)
+        a_cover = inter / max(len(a_tokens), 1)
+        if q_cover >= 0.9 and a_cover >= 0.4:
+            best = max(best, 0.9)
+        elif q_cover >= 0.75 and a_cover >= 0.35:
+            best = max(best, 0.85)
+        elif q_cover >= 0.6:
+            best = max(best, 0.8)
+        elif overlap >= 0.55:
+            best = max(best, 0.72)
+    return round(best, 4)
+
+
+def best_alias_hit(q: str, cands: list, *, strong_threshold: float = 0.9) -> tuple[dict | None, float]:
+    best_chunk = None
+    best_score = 0.0
+    for ch in cands or []:
+        sc = alias_hit_score_for_chunk(q, ch)
+        if sc > best_score:
+            best_score = sc
+            best_chunk = ch
+    if best_score >= strong_threshold:
+        return best_chunk, best_score
+    return None, best_score
+
+
+def best_alias_hit_in_corpus(
+    q: str,
+    *,
+    client_id: str | None = None,
+    strong_threshold: float = 0.82,
+) -> tuple[dict | None, float]:
+    corpus = load_corpus_if_needed()
+    best_chunk = None
+    best_score = 0.0
+    for ch in corpus:
+        if client_id and ch.get("client_id") != client_id:
+            continue
+        sc = alias_hit_score_for_chunk(q, ch)
+        if sc > best_score:
+            best_score = sc
+            best_chunk = ch
+    if best_chunk and best_score >= strong_threshold:
+        chosen = dict(best_chunk)
+        chosen["_alias_score"] = round(best_score, 4)
+        # Keep compatibility with score-based logging/meta in app flow.
+        chosen["_score"] = round(best_score, 4)
+        return chosen, round(best_score, 4)
+    return None, round(best_score, 4)
+
+
+def is_point_literal_query(q: str) -> bool:
+    q = (q or "").strip()
+    if not q:
+        return False
+    qn = _norm_text(q)
+    tokens = [t for t in qn.split() if t]
+    if not tokens:
+        return False
+    if any(ch.isdigit() for ch in q):
+        return True
+    if len(tokens) <= 4:
+        question_words = {"как", "что", "почему", "зачем", "когда", "какие", "какой", "какая"}
+        if not any(t in question_words for t in tokens):
+            return True
+    return False
+
+
 def embed_q(q: str) -> np.ndarray:
     v = client.embeddings.create(model=EMB_MODEL, input=q).data[0].embedding
     v = np.array(v, dtype=np.float32)

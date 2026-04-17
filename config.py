@@ -22,7 +22,7 @@ EMB_PATH = os.path.join(DATA_DIR, "embeddings.npy")
 SQLITE_PATH = os.getenv("SQLITE_PATH", os.path.join(DATA_DIR, "bot.db"))
 
 # --- Retrieval / policy пороги ---
-LOW_SCORE_THRESHOLD = float(os.getenv("LOW_SCORE_THRESHOLD", "0.40"))
+LOW_SCORE_THRESHOLD = float(os.getenv("LOW_SCORE_THRESHOLD", "0.33"))
 BROAD_QUERY_MAX_WORDS = int(os.getenv("BROAD_QUERY_MAX_WORDS", "5"))
 
 # --- Ответ при низком score ---

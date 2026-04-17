@@ -57,6 +57,7 @@ def _fresh_defaults() -> dict:
         "lead_intent": "none",
         "shown_cta_topics": [],
         "topic_state": {},
+        "last_content_ui_payload": None,
     }
 
 
@@ -175,6 +176,7 @@ def record_last_bot_payload(session_id: str, payload: dict) -> None:
         cta = payload.get("cta")
         fup = meta.get("followups") or []
         qr = payload.get("quick_replies") or []
+        sit = payload.get("situation") or {}
         buttons = []
         for x in fup[:2]:
             if isinstance(x, dict):
@@ -183,7 +185,10 @@ def record_last_bot_payload(session_id: str, payload: dict) -> None:
             if isinstance(x, dict):
                 buttons.append({"label": x.get("label"), "ref": x.get("ref")})
         st["last_presented_buttons"] = buttons[:6]
-        if (payload.get("situation") or {}).get("show"):
+        if sit.get("show") and sit.get("mode") == "pending":
+            st["last_bot_action"] = "situation_collect"
+            st["last_offer_type"] = "situation"
+        elif sit.get("show") and sit.get("mode") == "normal":
             st["last_bot_action"] = "offered_situation"
             st["last_offer_type"] = "situation"
         elif cta:
@@ -198,7 +203,30 @@ def record_last_bot_payload(session_id: str, payload: dict) -> None:
         else:
             st["last_bot_action"] = "none"
             st["last_offer_type"] = None
+
+        if (
+            not st.get("situation_pending")
+            and not meta.get("lead_flow")
+            and not meta.get("situation_collect")
+            and not meta.get("low_score")
+            and not meta.get("error")
+        ):
+            st["last_content_ui_payload"] = {
+                "answer": payload.get("answer"),
+                "quick_replies": list(payload.get("quick_replies") or []),
+                "cta": payload.get("cta"),
+                "video": payload.get("video"),
+                "situation": dict(sit) if isinstance(sit, dict) else {"show": False, "mode": "normal"},
+                "offer": payload.get("offer"),
+                "meta": json.loads(json.dumps(meta, ensure_ascii=False)),
+            }
         _persist_unlocked(session_id, st)
+
+
+def get_last_content_ui_payload(session_id: str) -> dict | None:
+    st = mem_get(session_id)
+    snap = st.get("last_content_ui_payload")
+    return snap if isinstance(snap, dict) else None
 
 
 def is_active_lead_flow(session_state: dict) -> bool:
@@ -226,6 +254,7 @@ def get_topic_state(session_id: str, doc_id: str) -> dict:
         "video_shown": bool(topic.get("video_shown", False)),
         "video_pending": bool(topic.get("video_pending", False)),
         "situation_offered": bool(topic.get("situation_offered", False)),
+        "suggest_ref_used": bool(topic.get("suggest_ref_used", False)),
         "refs_deferred": list(topic.get("refs_deferred") or []),
         "cta_shown": bool(topic.get("cta_shown", False)),
     }
@@ -239,6 +268,7 @@ def _upsert_topic_state(st: dict, doc_id: str, patch: dict) -> None:
         "video_shown": False,
         "video_pending": False,
         "situation_offered": False,
+        "suggest_ref_used": False,
         "refs_deferred": [],
         "cta_shown": False,
     }
@@ -249,6 +279,10 @@ def _upsert_topic_state(st: dict, doc_id: str, patch: dict) -> None:
 def set_current_doc(session_id: str, doc_id: str) -> None:
     with _lock:
         st = mem_get(session_id)
+        prev = (st.get("current_doc_id") or "").strip()
+        new_id = (doc_id or "").strip()
+        if new_id and prev and prev != new_id:
+            _upsert_topic_state(st, new_id, {"suggest_ref_used": False})
         st["current_doc_id"] = doc_id
         _persist_unlocked(session_id, st)
 
@@ -274,18 +308,19 @@ def increment_doc_turn_if_contentful(
     is_low_score: bool,
     is_error: bool,
     lead_flow_active: bool,
-) -> None:
+) -> int | None:
     if not doc_id:
-        return
+        return None
     if not contentful or is_low_score or is_error or lead_flow_active:
-        return
+        return None
     with _lock:
         st = mem_get(session_id)
         cur = get_topic_state(session_id, doc_id)
-        _upsert_topic_state(
-            st, doc_id, {"doc_turn_count": int(cur.get("doc_turn_count") or 0) + 1}
-        )
+        prev = int(cur.get("doc_turn_count") or 0)
+        new_count = prev + 1
+        _upsert_topic_state(st, doc_id, {"doc_turn_count": new_count})
         _persist_unlocked(session_id, st)
+        return prev
 
 
 def mark_video_pending(session_id: str, doc_id: str, pending: bool = True) -> None:
@@ -306,6 +341,13 @@ def mark_situation_offered(session_id: str, doc_id: str) -> None:
     with _lock:
         st = mem_get(session_id)
         _upsert_topic_state(st, doc_id, {"situation_offered": True})
+        _persist_unlocked(session_id, st)
+
+
+def mark_suggest_ref_used(session_id: str, doc_id: str, used: bool = True) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        _upsert_topic_state(st, doc_id, {"suggest_ref_used": bool(used)})
         _persist_unlocked(session_id, st)
 
 

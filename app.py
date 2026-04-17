@@ -2,6 +2,7 @@ import os
 import time
 
 from flask import Flask, jsonify, request, send_from_directory
+import session as session_mod
 
 from config import DEBUG_TOKEN, LOW_SCORE_THRESHOLD, PORT, resolve_client_id
 from lead_service import handle_lead
@@ -10,15 +11,19 @@ from logging_setup import get_logger, make_request_context, log_json
 from meta_loader import get_doc_meta
 from policy import (
     apply_response_policy,
+    booking_intent,
     contacts_intent,
     pick_contacts_chunk,
     pick_prices_chunk,
     price_intent,
 )
 from retriever import (
+    alias_hit_score_for_chunk,
+    best_alias_hit_in_corpus,
     broad_query_detect,
     chunk_info,
     get_chunk_by_ref,
+    is_point_literal_query,
     llm_rerank,
     prefer_overview_if_broad,
     retrieve,
@@ -59,6 +64,75 @@ from ux_builder import (
 
 app = Flask(__name__, static_folder="static")
 logger = get_logger("bot")
+
+
+def _get_last_content_ui_payload_compat(sid: str) -> dict | None:
+    fn = getattr(session_mod, "get_last_content_ui_payload", None)
+    if callable(fn):
+        return fn(sid)
+    return None
+
+
+def _mark_suggest_ref_used_compat(sid: str, doc_id: str, used: bool = True) -> None:
+    fn = getattr(session_mod, "mark_suggest_ref_used", None)
+    if callable(fn):
+        fn(sid, doc_id, used)
+
+
+def _increment_doc_turn_with_pre(
+    sid: str,
+    doc_id: str | None,
+    *,
+    contentful: bool,
+    is_low_score: bool,
+    is_error: bool,
+    lead_flow_active: bool,
+) -> int | None:
+    pre_turn = increment_doc_turn_if_contentful(
+        sid,
+        doc_id,
+        contentful=contentful,
+        is_low_score=is_low_score,
+        is_error=is_error,
+        lead_flow_active=lead_flow_active,
+    )
+    if pre_turn is not None or not doc_id:
+        return pre_turn
+    # Backward compatibility: old session.py increments but returns None.
+    if contentful and not is_low_score and not is_error and not lead_flow_active:
+        cur = int((get_topic_state(sid, doc_id) or {}).get("doc_turn_count") or 0)
+        if cur > 0:
+            return cur - 1
+    return None
+
+
+def _apply_response_policy_compat(
+    payload: dict,
+    session_state: dict,
+    q: str,
+    *,
+    topic_state: dict,
+    doc_meta: dict,
+    pre_doc_turn_count: int | None,
+) -> dict:
+    try:
+        return apply_response_policy(
+            payload,
+            session_state,
+            q,
+            topic_state=topic_state,
+            doc_meta=doc_meta,
+            pre_doc_turn_count=pre_doc_turn_count,
+        )
+    except TypeError:
+        # Backward compatibility for older policy.py without pre_doc_turn_count.
+        return apply_response_policy(
+            payload,
+            session_state,
+            q,
+            topic_state=topic_state,
+            doc_meta=doc_meta,
+        )
 
 
 def _to_plain(o):
@@ -162,7 +236,7 @@ def _respond_from_chunk(
 
     st = mem_get(sid)
     lead_flow_active = is_active_lead_flow(st)
-    increment_doc_turn_if_contentful(
+    pre_turn = _increment_doc_turn_with_pre(
         sid,
         doc_id,
         contentful=bool(answer.strip()),
@@ -186,12 +260,13 @@ def _respond_from_chunk(
         client_id=client_id,
         topic_state=tstate,
     )
-    payload = apply_response_policy(
+    payload = _apply_response_policy_compat(
         payload,
         st,
         q,
         topic_state=tstate,
         doc_meta=meta,
+        pre_doc_turn_count=pre_turn,
     )
     refs_before_ui = list(payload.get("quick_replies") or [])
     payload = normalize_policy_payload(payload)
@@ -203,7 +278,8 @@ def _respond_from_chunk(
         elif meta.get("video_key") and not bool(get_topic_state(sid, doc_id).get("video_shown")):
             mark_video_pending(sid, doc_id, pending=True)
 
-        if bool((payload.get("situation") or {}).get("show")):
+        sit = payload.get("situation") or {}
+        if sit.get("show") and sit.get("mode") == "normal":
             mark_situation_offered(sid, doc_id)
 
         if bool(pdec.get("defer_refs")):
@@ -211,6 +287,7 @@ def _respond_from_chunk(
         elif "refs_with_two_followups_conflict" in ui_dropped and refs_before_ui:
             defer_refs(sid, doc_id, refs_before_ui[:1])
         elif payload.get("quick_replies"):
+            _mark_suggest_ref_used_compat(sid, doc_id, True)
             # if we showed a deferred ref, consume one from per-doc queue
             tstate_after = get_topic_state(sid, doc_id)
             if tstate_after.get("refs_deferred"):
@@ -243,7 +320,7 @@ def _lead_flow_reply(sid: str, q: str, client_id: str | None):
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": False, "mode": "normal"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                     },
@@ -260,7 +337,7 @@ def _lead_flow_reply(sid: str, q: str, client_id: str | None):
                     "quick_replies": [],
                     "cta": None,
                     "video": None,
-                    "situation": {"show": False},
+                    "situation": {"show": False, "mode": "normal"},
                     "offer": None,
                     "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                 },
@@ -279,7 +356,7 @@ def _lead_flow_reply(sid: str, q: str, client_id: str | None):
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": False, "mode": "normal"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                     },
@@ -307,7 +384,7 @@ def _lead_flow_reply(sid: str, q: str, client_id: str | None):
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": False, "mode": "normal"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "lead_flow": True, "lead_error": lead_payload.get("error")},
                     },
@@ -325,7 +402,7 @@ def _lead_flow_reply(sid: str, q: str, client_id: str | None):
                     "quick_replies": [],
                     "cta": None,
                     "video": None,
-                    "situation": {"show": False},
+                    "situation": {"show": False, "mode": "normal"},
                     "offer": None,
                     "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                 },
@@ -388,6 +465,74 @@ def ask():
             return safe_jsonify(reset_session_response(sid))
 
         st = mem_get(sid)
+
+        if data.get("situation_action") == "back":
+            set_situation_pending(sid, False)
+            snap = _get_last_content_ui_payload_compat(sid)
+            if isinstance(snap, dict) and snap.get("answer"):
+                restored = {
+                    "answer": snap.get("answer") or "",
+                    "quick_replies": list(snap.get("quick_replies") or []),
+                    "cta": snap.get("cta"),
+                    "video": snap.get("video"),
+                    "situation": snap.get("situation") or {"show": False, "mode": "normal"},
+                    "offer": snap.get("offer"),
+                    "meta": dict(snap.get("meta") or {}),
+                }
+                doc_id_back = st.get("current_doc_id") or (
+                    (restored.get("meta") or {}).get("file") and os.path.splitext(
+                        os.path.basename((restored.get("meta") or {}).get("file") or "")
+                    )[0]
+                )
+                if doc_id_back and get_topic_state(sid, doc_id_back).get("situation_offered"):
+                    restored["situation"] = {"show": False, "mode": "normal"}
+                meta_r = restored.setdefault("meta", {})
+                meta_r["situation_back"] = True
+                meta_r.setdefault("sid", sid)
+                meta_r.setdefault("client_id", client_id)
+                return safe_jsonify(
+                    finalize_ask(
+                        restored,
+                        sid,
+                        q,
+                        doc_id=st.get("current_doc_id"),
+                    )
+                )
+            return safe_jsonify(
+                finalize_ask(
+                    {
+                        "answer": "Хорошо, продолжим. Задайте вопрос или выберите тему.",
+                        "quick_replies": [],
+                        "cta": None,
+                        "video": None,
+                        "situation": {"show": False, "mode": "normal"},
+                        "offer": None,
+                        "meta": {"sid": sid, "client_id": client_id, "situation_back": True},
+                    },
+                    sid,
+                    q,
+                    doc_id=st.get("current_doc_id"),
+                )
+            )
+
+        if q and booking_intent(q) and not is_active_lead_flow(st):
+            set_lead_intent(sid, "collecting_name")
+            return safe_jsonify(
+                finalize_ask(
+                    {
+                        "answer": "Отлично. Как к вам можно обращаться?",
+                        "quick_replies": [],
+                        "cta": None,
+                        "video": None,
+                        "situation": {"show": False, "mode": "normal"},
+                        "offer": None,
+                        "meta": {"sid": sid, "client_id": client_id, "lead_flow": True, "booking_intent": True},
+                    },
+                    sid,
+                    q,
+                )
+            )
+
         if is_active_lead_flow(st):
             flow_resp = _lead_flow_reply(sid, q, client_id)
             if flow_resp is not None:
@@ -402,7 +547,7 @@ def ask():
                             "quick_replies": [],
                             "cta": None,
                             "video": None,
-                            "situation": {"show": False},
+                            "situation": {"show": True, "mode": "pending"},
                             "offer": None,
                             "meta": {"sid": sid, "client_id": client_id, "situation_collect": True},
                         },
@@ -420,7 +565,7 @@ def ask():
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": False, "mode": "normal"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                     },
@@ -438,7 +583,7 @@ def ask():
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": False, "mode": "normal"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                     },
@@ -456,7 +601,7 @@ def ask():
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": True, "mode": "pending"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "situation_collect": True},
                     },
@@ -489,7 +634,7 @@ def ask():
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": True, "mode": "pending"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "situation_collect": True},
                     },
@@ -507,7 +652,7 @@ def ask():
                         "quick_replies": [],
                         "cta": None,
                         "video": None,
-                        "situation": {"show": False},
+                        "situation": {"show": False, "mode": "normal"},
                         "offer": None,
                         "meta": {"sid": sid, "client_id": client_id, "lead_flow": True},
                     },
@@ -518,7 +663,7 @@ def ask():
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
 
-        cands = retrieve(q, topk=3, client_id=client_id)
+        cands = retrieve(q, topk=8, client_id=client_id)
         cands = prefer_overview_if_broad(cands, broad_query_detect(q))
 
         if not cands:
@@ -527,8 +672,14 @@ def ask():
 
         is_contacts = contacts_intent(q)
         is_price = price_intent(q)
+        alias_chunk, alias_score = best_alias_hit_in_corpus(
+            q,
+            client_id=client_id,
+            strong_threshold=0.82,
+        )
+        alias_strong = alias_chunk is not None
 
-        allow_low = (is_contacts and pick_contacts_chunk(cands)) or (
+        allow_low = alias_strong or (is_contacts and pick_contacts_chunk(cands)) or (
             is_price and pick_prices_chunk(cands)
         )
         if float(cands[0].get("_score") or 0) < LOW_SCORE_THRESHOLD and not allow_low:
@@ -537,8 +688,19 @@ def ask():
                 "low_score_fallback",
                 score=round(float(cands[0].get("_score") or 0), 4),
                 threshold=LOW_SCORE_THRESHOLD,
+                alias_score=alias_score,
             )
-            return safe_jsonify(finalize_ask(low_score_response(sid, client_id), sid, q))
+            st_ls = mem_get(sid)
+            pls = low_score_response(sid, client_id)
+            pls = _apply_response_policy_compat(
+                pls,
+                st_ls,
+                q,
+                topic_state={},
+                doc_meta={},
+                pre_doc_turn_count=None,
+            )
+            return safe_jsonify(finalize_ask(pls, sid, q))
 
         if is_contacts:
             picked = pick_contacts_chunk(cands)
@@ -579,11 +741,53 @@ def ask():
                     client_id=client_id,
                 )
 
+        if alias_strong and alias_chunk is not None:
+            final_chunk = alias_chunk
+            final_score = final_chunk.get("_score")
+            _log_selection(
+                q=q,
+                chosen_chunk=final_chunk,
+                chosen_score=final_score,
+                original_top_score=(cands[0].get("_score") if cands else None),
+                rerank_applied=False,
+            )
+            log_json(
+                logger,
+                "alias_hit_selected",
+                alias_score=alias_score,
+                file=final_chunk.get("file"),
+                h2_id=final_chunk.get("h2_id"),
+                h3_id=final_chunk.get("h3_id"),
+            )
+            return _respond_from_chunk(
+                chunk=final_chunk,
+                q=q,
+                sid=sid,
+                client_id=client_id,
+            )
+
         top = cands[0]
         best = float(top["_score"])
-        use_rerank = 0.45 <= best <= 0.62 and len(cands) >= 2
+        score_gap = (
+            abs(float(cands[0].get("_score") or 0.0) - float(cands[1].get("_score") or 0.0))
+            if len(cands) >= 2
+            else 1.0
+        )
+        use_rerank = (
+            0.45 <= best <= 0.62
+            and len(cands) >= 2
+            and score_gap <= 0.05
+            and not is_point_literal_query(q)
+            and not alias_strong
+        )
         if use_rerank:
-            log_json(logger, "Applying rerank", original_score=best, candidates_count=len(cands))
+            log_json(
+                logger,
+                "Applying rerank",
+                original_score=best,
+                candidates_count=len(cands),
+                score_gap=round(score_gap, 4),
+            )
             top = llm_rerank(q, cands[:3])
 
         _log_selection(
@@ -607,9 +811,31 @@ def dbg():
     if client_id is None:
         return jsonify({"error": "unknown_client"}), 403
     c = retrieve(q, topk=5, client_id=client_id)
+    alias_selected, alias_score = best_alias_hit_in_corpus(
+        q,
+        client_id=client_id,
+        strong_threshold=0.82,
+    )
     for x in c:
+        x["alias_score"] = alias_hit_score_for_chunk(q, x)
         x.pop("text", None)
-    return jsonify({"q": q, "client_id": client_id, "candidates": c})
+    alias_summary = None
+    if isinstance(alias_selected, dict):
+        alias_summary = {
+            "file": alias_selected.get("file"),
+            "h2_id": alias_selected.get("h2_id"),
+            "h3_id": alias_selected.get("h3_id"),
+            "score": alias_selected.get("_score"),
+        }
+    return jsonify(
+        {
+            "q": q,
+            "client_id": client_id,
+            "alias_score": round(float(alias_score or 0.0), 4),
+            "alias_selected": alias_summary,
+            "candidates": c,
+        }
+    )
 
 
 @app.get("/static/<path:path>")

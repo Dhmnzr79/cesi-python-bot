@@ -147,7 +147,7 @@ def build_ask_response(
         covered_h3_ids=(topic_state or {}).get("covered_h3_ids") or [],
         client_id=client_id,
     )
-    followups = fups_full[:2]
+    followups = fups_full
 
     cta_btn = build_cta(meta)
     quick_refs = dedup_refs_vs_cta(quick_refs, cta_btn)
@@ -179,7 +179,7 @@ def build_ask_response(
         "quick_replies": quick_refs,
         "cta": cta_btn,
         "video": None,
-        "situation": {"show": False},
+        "situation": {"show": False, "mode": "normal"},
         "offer": pick_relevant_offer(meta),
         "meta": meta_out,
     }
@@ -202,14 +202,6 @@ def normalize_policy_payload(payload: dict) -> dict:
         dropped.append("suggest_refs_over_limit")
         payload["quick_replies"] = refs[:1]
 
-    if payload.get("video") and (payload.get("situation") or {}).get("show"):
-        dropped.append("video_with_situation_conflict")
-        payload["situation"] = {"show": False}
-
-    if len(meta.get("followups") or []) >= 2 and payload.get("quick_replies"):
-        dropped.append("refs_with_two_followups_conflict")
-        payload["quick_replies"] = []
-
     if dropped:
         meta["ui_dropped"] = dropped
     return payload
@@ -220,6 +212,8 @@ def empty_question_response() -> dict:
         "answer": "Уточните вопрос.",
         "quick_replies": [],
         "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
         "offer": None,
         "meta": {"error": "empty_question"},
     }
@@ -230,6 +224,8 @@ def no_candidates_response() -> dict:
         "answer": "Пока не нашёл подходящий материал в базе. Сформулируйте вопрос иначе или выберите один из вариантов ниже.",
         "quick_replies": [],
         "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
         "offer": None,
         "meta": {"file": None},
     }
@@ -240,6 +236,8 @@ def reset_session_response(sid: str) -> dict:
         "answer": "Начнём заново. Чем помочь?",
         "quick_replies": [],
         "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
         "offer": None,
         "meta": {"sid": sid},
     }
@@ -250,6 +248,8 @@ def internal_error_response() -> dict:
         "answer": "Извините, не получилось ответить. Попробуйте переформулировать вопрос.",
         "quick_replies": [],
         "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
         "offer": None,
         "meta": {"error": "internal"},
     }
@@ -270,6 +270,8 @@ def low_score_response(sid: str, client_id: str | None = None) -> dict:
         "answer": "Не нашёл точного ответа на этот вопрос. Уточните или выберите тему.",
         "quick_replies": [],
         "cta": default_cta_dict(),
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
         "offer": None,
         "meta": meta_out,
     }

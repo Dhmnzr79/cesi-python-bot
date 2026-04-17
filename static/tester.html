@@ -217,8 +217,52 @@
     function renderSituation(data) {
       situation.innerHTML = "";
 
-      if (!data || !data.situation || data.situation.show !== true) {
+      const sit = data && data.situation;
+      if (!sit || sit.show !== true) {
         situation.textContent = "Сейчас блок ситуации не предложен ботом.";
+        return;
+      }
+
+      const mode = sit.mode || "normal";
+
+      if (mode === "pending") {
+        const hint = document.createElement("div");
+        hint.className = "muted";
+        hint.textContent = "Режим ситуации: опишите коротко ваш случай (1–2 фразы).";
+        situation.appendChild(hint);
+
+        const textarea = document.createElement("textarea");
+        textarea.placeholder = "Например: давно нет зуба, боюсь боли, хочу понять сроки и цену";
+        situation.appendChild(textarea);
+
+        const row = document.createElement("div");
+        row.style.marginTop = "8px";
+        row.style.display = "flex";
+        row.style.gap = "8px";
+        row.style.flexWrap = "wrap";
+
+        const sendSituationBtn = document.createElement("button");
+        sendSituationBtn.textContent = "Отправить ситуацию";
+
+        const backBtn = document.createElement("button");
+        backBtn.textContent = "Назад к диалогу";
+
+        row.appendChild(sendSituationBtn);
+        row.appendChild(backBtn);
+        situation.appendChild(row);
+
+        sendSituationBtn.onclick = () => {
+          const text = textarea.value.trim();
+          if (!text) return;
+          sendAsk({ q: text });
+          textarea.value = "";
+        };
+
+        backBtn.onclick = () => {
+          sendAsk({ situation_action: "back" });
+        };
+
+        textarea.focus();
         return;
       }
 
@@ -226,34 +270,8 @@
       btn.textContent = "Рассказать о ситуации";
       situation.appendChild(btn);
 
-      const box = document.createElement("div");
-      box.style.marginTop = "10px";
-
-      const textarea = document.createElement("textarea");
-      textarea.placeholder = "Например: давно нет зуба, боюсь боли, хочу понять сроки и цену";
-
-      const sendSituationBtn = document.createElement("button");
-      sendSituationBtn.textContent = "Отправить ситуацию";
-      sendSituationBtn.style.marginTop = "8px";
-
-      box.appendChild(textarea);
-      box.appendChild(sendSituationBtn);
-      situation.appendChild(box);
-      box.style.display = "none";
-
       btn.onclick = () => {
-        sendAsk({
-          situation_action: "start"
-        });
-        box.style.display = "block";
-        textarea.focus();
-      };
-
-      sendSituationBtn.onclick = () => {
-        const text = textarea.value.trim();
-        if (!text) return;
-        sendAsk({ q: text });
-        textarea.value = "";
+        sendAsk({ situation_action: "start" });
       };
     }
 
