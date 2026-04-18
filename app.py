@@ -5,7 +5,7 @@ import inspect
 from flask import Flask, jsonify, request, send_from_directory
 import session as session_mod
 
-from config import DEBUG_TOKEN, PORT, resolve_client_id
+from config import ALIAS_STRONG_THRESHOLD, DEBUG_TOKEN, PORT, resolve_client_id
 from lead_service import handle_lead
 from logging_setup import get_logger, make_request_context, log_json
 from chunk_responder import respond_from_chunk
@@ -19,6 +19,7 @@ from retriever import (
     best_alias_hit_in_corpus,
     chunk_info,
     get_chunk_by_ref,
+    normalize_retrieval_query,
     retrieve,
 )
 from session import (
@@ -299,7 +300,7 @@ def ask():
             return _service_reply(empty_question_response(), sid, q, track_user=False)
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
-        selection = select_chunk_for_question(q, client_id=client_id)
+        selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
         mode = selection.get("mode")
         dmeta = selection.get("debug_meta") or {}
         if mode == "no_candidates":
@@ -362,14 +363,16 @@ def dbg():
     client_id = resolve_client_id(request.args.get("client_id"))
     if client_id is None:
         return jsonify({"error": "unknown_client"}), 403
-    c = retrieve(q, topk=5, client_id=client_id)
+    q_raw = (q or "").strip()
+    q_use = normalize_retrieval_query(q_raw) or q_raw
+    c = retrieve(q_raw, topk=5, client_id=client_id)
     alias_selected, alias_score = best_alias_hit_in_corpus(
-        q,
+        q_use,
         client_id=client_id,
-        strong_threshold=0.82,
+        strong_threshold=ALIAS_STRONG_THRESHOLD,
     )
     for x in c:
-        x["alias_score"] = alias_hit_score_for_chunk(q, x)
+        x["alias_score"] = alias_hit_score_for_chunk(q_use, x)
         x.pop("text", None)
     alias_summary = None
     if isinstance(alias_selected, dict):

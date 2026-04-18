@@ -9,17 +9,96 @@ from config import (
     EMPATHY_ON,
     MEMORY_ON,
     OPENAI_API_KEY,
+    QUERY_REWRITE_MAX_MESSAGES,
+    QUERY_REWRITE_MODEL,
+    QUERY_REWRITE_ON,
     TRIGGERS_COMPILED,
 )
+from logging_setup import get_logger, log_json
 from session import (
     is_first_in_topic,
     mem_add_bot,
     mem_add_user,
     mem_context,
+    mem_get,
     update_topic_empathy,
 )
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+logger = get_logger("bot")
+
+_REWRITE_SYSTEM = (
+    "Ты формулируешь поисковый запрос для семантического поиска по базе знаний стоматологии. "
+    "По последним репликам диалога и текущему вопросу пациента напиши одну короткую строку на русском "
+    "для векторного поиска (ключевые сущности: врач, процедура, симптом, зуб, материал). "
+    "Не выдумывай факты: опирайся только на явное в диалоге и в текущем вопросе. "
+    "Если вопрос уже самодостаточен — сожми до сути без лишних слов. "
+    'Ответь одним JSON-объектом с ключом "search_query" (строка). Без markdown.'
+)
+
+
+def rewrite_query_for_retrieval(
+    session_id: str, current_q: str, *, client_id: str | None = None
+) -> str:
+    """Переписать вопрос для retrieval с учётом последних реплик (текущий ход ещё не в hist)."""
+    q0 = (current_q or "").strip()
+    if not QUERY_REWRITE_ON or not q0:
+        return q0
+    st = mem_get(session_id)
+    hist = list(st.get("hist") or [])
+    if not hist:
+        return q0
+    tail = hist[-QUERY_REWRITE_MAX_MESSAGES:]
+    dialog_lines = [f"{m.get('role', '?')}: {m.get('content', '')}" for m in tail]
+    dialog_block = "\n".join(dialog_lines)
+    user_block = (
+        "Последние реплики диалога:\n"
+        f"{dialog_block}\n\n"
+        "Текущий вопрос пациента:\n"
+        f"{q0}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=QUERY_REWRITE_MODEL,
+            temperature=0.15,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _REWRITE_SYSTEM},
+                {"role": "user", "content": user_block},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("rewrite_not_object")
+        sq = obj.get("search_query")
+        if sq is None and "query" in obj:
+            sq = obj.get("query")
+        out = str(sq).strip() if sq is not None else ""
+        if not out or len(out) > 600:
+            raise ValueError("rewrite_empty_or_long")
+        log_json(
+            logger,
+            "retrieval_query_rewrite",
+            client_id=client_id,
+            sid=session_id,
+            query_raw=q0[:200],
+            query_for_retrieval=out[:200],
+            rewrite_applied=out.lower() != q0.lower(),
+        )
+        return out
+    except Exception as e:
+        log_json(
+            logger,
+            "retrieval_query_rewrite_failed",
+            client_id=client_id,
+            sid=session_id,
+            query_raw=q0[:200],
+            err=str(e)[:300],
+        )
+        return q0
+
 
 BASE_SYSTEM = (
     "Ты — спокойный и доброжелательный врач-имплантолог. "

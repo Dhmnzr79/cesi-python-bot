@@ -13,10 +13,13 @@ from config import (
     CORPUS_PATH,
     EMB_PATH,
     EMB_MODEL,
+    ALIAS_STRONG_THRESHOLD,
 )
 from llm import client
 from logging_setup import get_logger, log_json
 from meta_loader import get_doc_meta, get_doc_path
+
+import alias_lexical
 
 logger = get_logger("bot")
 
@@ -297,6 +300,29 @@ def chunk_is_overview(c: dict) -> bool:
     return (not h2 and not h3) or h2 in {"overview", "korotko"} or h3 in {"overview", "korotko"}
 
 
+_LEADING_QUERY_FILLERS = re.compile(
+    r"^(?:[ауоыэи]+\s+|ну\s+|а\s+|э\s+|эм\s+)+",
+    re.I,
+)
+
+
+def normalize_retrieval_query(q: str) -> str:
+    """Единая политика перед embed: частицы в начале, ё/е, пробелы.
+
+    Не трогаем смысловое тело; пустой результат после снятия префиксов — норма.
+    """
+    s = (q or "").strip()
+    if not s:
+        return ""
+    s = s.replace("ё", "е").replace("Ё", "Е")
+    prev = None
+    while prev != s:
+        prev = s
+        s = _LEADING_QUERY_FILLERS.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def broad_query_detect(q: str) -> bool:
     qn = (q or "").strip().lower()
     words = qn.split()
@@ -461,7 +487,7 @@ def _chunk_alias_terms(ch: dict) -> list[str]:
     return terms
 
 
-def alias_hit_score_for_chunk(q: str, ch: dict) -> float:
+def _alias_hit_score_raw_for_chunk(q: str, ch: dict) -> float:
     qn = _norm_text(q)
     if not qn:
         return 0.0
@@ -533,6 +559,103 @@ def alias_hit_score_for_chunk(q: str, ch: dict) -> float:
     return round(best, 4)
 
 
+def _lemma_join_token_match(inner: str, outer: str) -> bool:
+    """Совпадение по целым токенам (последовательность), не подстрока внутри одного слова.
+
+    Иначе лемма «имплант» из алиаса попадает внутрь «имплантолог» в запросе и даёт ложный strong-alias.
+    """
+    inner_t = inner.split()
+    outer_t = outer.split()
+    if not inner_t or not outer_t:
+        return False
+    if len(inner_t) == 1:
+        return inner_t[0] in outer_t
+    for i in range(len(outer_t) - len(inner_t) + 1):
+        if outer_t[i : i + len(inner_t)] == inner_t:
+            return True
+    return False
+
+
+def _lemma_alias_channel(q: str, ch: dict) -> float:
+    """Склонения: max с raw; pymorphy3 при наличии, иначе fallback на lower."""
+    q_core = _core_tokens(q)
+    if not q_core:
+        return 0.0
+    q_lem = alias_lexical.lemma_forms_for_tokens(q_core)
+    q_set = {x for x in q_lem if len(x) >= 2}
+    if not q_set:
+        return 0.0
+    best = 0.0
+    q_join = " ".join(q_lem)
+
+    for raw in _chunk_alias_terms(ch):
+        a_core = _core_tokens(raw)
+        if a_core:
+            a_lem = alias_lexical.lemma_forms_for_tokens(a_core)
+        else:
+            toks = [
+                t
+                for t in _norm_text(raw).split()
+                if len(t) >= 2 and t not in _ALIAS_STOP_WORDS
+            ]
+            a_lem = alias_lexical.lemma_forms_for_tokens(toks)
+        a_set = {x for x in a_lem if len(x) >= 2}
+        if not a_set:
+            continue
+
+        if q_set <= a_set:
+            best = max(best, 0.92)
+        if len(a_set) <= 5 and a_set <= q_set:
+            best = max(best, 0.88)
+
+        inter = len(q_set & a_set)
+        union = len(q_set | a_set) or 1
+        j = inter / union
+        if len(q_set) >= 2 and j >= 0.55:
+            best = max(best, 0.86)
+        elif j >= 0.45:
+            best = max(best, 0.78)
+
+        a_join = " ".join(a_lem)
+        if len(q_join) >= 3 and _lemma_join_token_match(q_join, a_join):
+            best = max(best, 0.93)
+        if len(a_join) >= 4 and _lemma_join_token_match(a_join, q_join):
+            best = max(best, 0.9)
+
+    return round(best, 4)
+
+
+def _trigram_alias_channel(q: str, ch: dict) -> float:
+    """Опечатки / близкие формы по триграммам (не заменяет raw/lemma).
+
+    Для короткого запроса и длинного алиаса целая строка даёт низкий Jaccard;
+    дополнительно сравниваем запрос с **отдельными словами** алиаса (парковку vs парковка).
+    """
+    qn = _norm_text(q)
+    if len(qn) < 2:
+        return 0.0
+    best = 0.0
+    for raw in _chunk_alias_terms(ch):
+        an = _norm_text(raw)
+        if len(an) < 2:
+            continue
+        b = alias_lexical.trigram_alias_boost(qn, an)
+        for tok in an.split():
+            if len(tok) < 4:
+                continue
+            b = max(b, alias_lexical.trigram_alias_boost(qn, tok))
+        if b > best:
+            best = b
+    return round(best, 4)
+
+
+def alias_hit_score_for_chunk(q: str, ch: dict) -> float:
+    raw = _alias_hit_score_raw_for_chunk(q, ch)
+    lem = _lemma_alias_channel(q, ch)
+    tri = _trigram_alias_channel(q, ch)
+    return round(max(raw, lem, tri), 4)
+
+
 def best_alias_hit(q: str, cands: list, *, strong_threshold: float = 0.9) -> tuple[dict | None, float]:
     best_chunk = None
     best_score = 0.0
@@ -546,12 +669,12 @@ def best_alias_hit(q: str, cands: list, *, strong_threshold: float = 0.9) -> tup
     return None, best_score
 
 
-def best_alias_hit_in_corpus(
+def corpus_alias_leader(
     q: str,
     *,
     client_id: str | None = None,
-    strong_threshold: float = 0.82,
 ) -> tuple[dict | None, float]:
+    """Лучший чанк по алиасам и его score (без порога)."""
     corpus = load_corpus_if_needed()
     best_chunk = None
     best_score = 0.0
@@ -562,13 +685,25 @@ def best_alias_hit_in_corpus(
         if sc > best_score:
             best_score = sc
             best_chunk = ch
-    if best_chunk and best_score >= strong_threshold:
-        chosen = dict(best_chunk)
-        chosen["_alias_score"] = round(best_score, 4)
-        # Keep compatibility with score-based logging/meta in app flow.
-        chosen["_score"] = round(best_score, 4)
-        return chosen, round(best_score, 4)
-    return None, round(best_score, 4)
+    if not best_chunk:
+        return None, 0.0
+    return dict(best_chunk), round(best_score, 4)
+
+
+def best_alias_hit_in_corpus(
+    q: str,
+    *,
+    client_id: str | None = None,
+    strong_threshold: float | None = None,
+) -> tuple[dict | None, float]:
+    thr = ALIAS_STRONG_THRESHOLD if strong_threshold is None else strong_threshold
+    leader, score = corpus_alias_leader(q, client_id=client_id)
+    if leader and score >= thr:
+        chosen = dict(leader)
+        chosen["_alias_score"] = round(score, 4)
+        chosen["_score"] = round(score, 4)
+        return chosen, score
+    return None, score
 
 
 def is_point_literal_query(q: str) -> bool:
@@ -597,10 +732,27 @@ def embed_q(q: str) -> np.ndarray:
 
 def retrieve(q: str, topk: int = 4, *, client_id: str | None = None) -> list:
     emb = _get_embeddings()
-    if emb is None:
-        log_json(logger, "retrieval_skipped_no_embeddings", used_query=q, emb_path=EMB_PATH)
+    q_in = (q or "").strip()
+    q_norm = normalize_retrieval_query(q_in)
+    q_embed = q_norm if q_norm else q_in
+    if not q_embed:
+        log_json(
+            logger,
+            "retrieval_skipped_empty_query",
+            query_raw=q_in[:200],
+            used_query="",
+        )
         return []
-    v = embed_q(q)
+    if emb is None:
+        log_json(
+            logger,
+            "retrieval_skipped_no_embeddings",
+            used_query=q_embed[:500],
+            query_raw=q_in[:200],
+            emb_path=EMB_PATH,
+        )
+        return []
+    v = embed_q(q_embed)
     sims = emb @ v
     idx = np.argsort(-sims)[: max(topk, 8)]
     seen, out = set(), []
@@ -627,7 +779,9 @@ def retrieve(q: str, topk: int = 4, *, client_id: str | None = None) -> list:
     log_json(
         logger,
         "retrieval_result",
-        used_query=q,
+        used_query=q_embed[:500],
+        query_raw=q_in[:500],
+        query_normalized=(q_norm[:500] if q_norm else None),
         k=topk,
         dedup_keys=["file", "h2_id", "h3_id"],
         chunks_used=chunks_used,

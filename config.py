@@ -10,6 +10,9 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMB_MODEL = os.getenv("MODEL_EMBED", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("MODEL_CHAT", "gpt-4o-mini")
+QUERY_REWRITE_MODEL = (os.getenv("MODEL_QUERY_REWRITE") or "").strip() or CHAT_MODEL
+QUERY_REWRITE_ON = os.getenv("QUERY_REWRITE_ON", "1").lower() in ("1", "true", "yes")
+QUERY_REWRITE_MAX_MESSAGES = int(os.getenv("QUERY_REWRITE_MAX_MESSAGES", "10"))
 
 # --- HTTP / app ---
 PORT = int(os.getenv("PORT", "9000"))
@@ -24,6 +27,17 @@ SQLITE_PATH = os.getenv("SQLITE_PATH", os.path.join(DATA_DIR, "bot.db"))
 # --- Retrieval / policy пороги ---
 LOW_SCORE_THRESHOLD = float(os.getenv("LOW_SCORE_THRESHOLD", "0.33"))
 BROAD_QUERY_MAX_WORDS = int(os.getenv("BROAD_QUERY_MAX_WORDS", "5"))
+
+# Алиас по корпусу: «сильный» — как раньше 0.82; «мягкий» — подстраховка у LOW_SCORE (не второй порог на клиента).
+ALIAS_STRONG_THRESHOLD = float(os.getenv("ALIAS_STRONG_THRESHOLD", "0.82"))
+ALIAS_SOFT_THRESHOLD = float(os.getenv("ALIAS_SOFT_THRESHOLD", "0.72"))
+
+# Selective rerank: узкое окно (как было) + «у порога» low_score при малом зазоре 1–2 места.
+RERANK_TOP_MIN = float(os.getenv("RERANK_TOP_MIN", "0.20"))
+RERANK_TOP_MAX = float(os.getenv("RERANK_TOP_MAX", "0.62"))
+RERANK_GAP_MAX = float(os.getenv("RERANK_GAP_MAX", "0.05"))
+RERANK_NEAR_LOW_TOP_MAX = float(os.getenv("RERANK_NEAR_LOW_TOP_MAX", "0.36"))
+RERANK_NEAR_LOW_GAP_MAX = float(os.getenv("RERANK_NEAR_LOW_GAP_MAX", "0.10"))
 
 # --- Ответ при низком score ---
 DEFAULT_CTA_TEXT = os.getenv("DEFAULT_CTA_TEXT", "Записаться на консультацию")

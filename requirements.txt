@@ -4,3 +4,4 @@ python-dotenv
 numpy
 python-frontmatter
 pyyaml
+pymorphy3

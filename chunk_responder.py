@@ -90,10 +90,25 @@ def _apply_response_policy_compat(
     )
 
 
+def chunk_context_md_for_llm(chunk: dict) -> str:
+    """Контент для генерации: H2 + H3 + тело чанка (имя врача и т.п. часто только в h2)."""
+    parts: list[str] = []
+    h2 = (chunk.get("h2") or "").strip()
+    h3 = (chunk.get("h3") or "").strip()
+    body = (chunk.get("text") or "").strip()
+    if h2:
+        parts.append(h2)
+    if h3:
+        parts.append(h3)
+    if body:
+        parts.append(body)
+    return "\n\n".join(parts) if parts else ""
+
+
 def ensure_answer(answer: str, chunk: dict) -> str:
     if isinstance(answer, str) and answer.strip():
         return answer
-    fallback = (chunk.get("text") or "").strip()
+    fallback = chunk_context_md_for_llm(chunk).strip() or (chunk.get("text") or "").strip()
     return (fallback[:800] + ("…" if len(fallback) > 800 else "")) or (
         "Пока не нашёл точный ответ. Можете уточнить вопрос?"
     )
@@ -128,7 +143,7 @@ def respond_from_chunk(
         set_current_doc(sid, doc_id)
 
     answer, profile = generate_answer_with_empathy(
-        llm_question or q, chunk.get("text", ""), meta, sid
+        llm_question or q, chunk_context_md_for_llm(chunk), meta, sid
     )
     answer = ensure_answer(answer, chunk)
 
