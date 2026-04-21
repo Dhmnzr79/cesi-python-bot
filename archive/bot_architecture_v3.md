@@ -290,7 +290,7 @@ UI-нормализация дополнительно ограничивает:
 
 - Логи: JSONL (`logs/app.jsonl`), структурированные события.
 - Отладка retrieval: `/__debug/retrieval`.
-- Тестер: `static/tester.html` (ручная проверка сценариев и payload).
+- Dev-инспектор JSON/retrieval: `static/debug/ask-inspector.html` (временно; папку `static/debug/` можно удалить).
 
 ---
 

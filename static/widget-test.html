@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Виджет — локальный тест</title>
+  <link rel="stylesheet" href="widget/widget.css">
+  <style>
+    .page-host {
+      min-height: 120vh;
+      padding: 24px;
+      max-width: 720px;
+      margin: 0 auto;
+      font-family: system-ui, sans-serif;
+      line-height: 1.5;
+    }
+
+    .page-host code {
+      font-size: 0.9em;
+    }
+  </style>
+</head>
+<body>
+  <main class="page-host">
+    <h1>Тестовая страница виджета</h1>
+    <p>
+      Запусти бота: <code>python app.py</code> (порт по умолчанию из <code>config.py</code>, обычно <strong>9000</strong>).
+      Открой эту страницу с того же хоста, например
+      <strong>http://127.0.0.1:9000/static/widget-test.html</strong>
+      — тогда <code>POST /ask</code> пойдёт на тот же origin (поле <code>apiBase</code> в конфиге пустое).
+    </p>
+    <p>Если <code>client_id</code> не <code>default</code>, поправь JSON в <code>#clinic-widget-config</code> под свой <code>ALLOWED_CLIENTS</code>.</p>
+    <p>
+      Для наглядного <strong>сырого JSON</strong> и <strong>кандидатов retrieval</strong> (как в старом тестере) открой отдельную dev-страницу:
+      <a href="debug/ask-inspector.html"><code>/static/debug/ask-inspector.html</code></a>
+      — её можно целиком удалить вместе с папкой <code>static/debug/</code>, на виджет она не влияет.
+    </p>
+  </main>
+
+  <script type="application/json" id="clinic-widget-config">
+  {
+    "apiBase": "",
+    "clientId": "default",
+    "avatarUrl": "/static/avatar.png",
+    "botName": "Помощник",
+    "onlineLabel": "Онлайн 24/7",
+    "welcomeText": "Задайте вопрос по лечению или выберите тему ниже.",
+    "starterPrompts": [
+      { "label": "Это больно?", "q": "Больно ли делать имплантацию?" },
+      { "label": "Сколько стоит?", "q": "Сколько стоит имплантация?" },
+      { "label": "Сроки", "q": "Сколько длятся работы по имплантации?" }
+    ]
+  }
+  </script>
+
+  <script type="module">
+    import { mountWidget } from "./widget/widget.js";
+
+    const cfgEl = document.getElementById("clinic-widget-config");
+    const config = JSON.parse(cfgEl.textContent);
+    const mount = document.createElement("div");
+    document.body.appendChild(mount);
+    mountWidget(mount, config);
+  </script>
+</body>
+</html>

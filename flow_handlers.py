@@ -3,18 +3,167 @@
 import os
 
 from lead_service import handle_lead
+from llm import classify_lead_name_shape
+from name_gate import hard_reject_lead_name
 from policy import booking_intent
 from session import (
     extract_name,
     extract_phone,
+    get_lead_pending_name,
     is_active_lead_flow,
+    mem_get,
+    parse_no,
     parse_yes,
     set_lead_intent,
+    set_lead_pending_name,
     set_situation_note,
     set_situation_pending,
     update_profile,
-    mem_get,
 )
+
+_LEAD_NAME_CONFIRM_YES = "lead:name_confirm:yes"
+_LEAD_NAME_CONFIRM_NO = "lead:name_confirm:no"
+
+
+def _name_confirm_quick_replies() -> list[dict]:
+    return [
+        {"label": "Да", "ref": _LEAD_NAME_CONFIRM_YES},
+        {"label": "Нет, введу по-другому", "ref": _LEAD_NAME_CONFIRM_NO},
+    ]
+
+
+def _collecting_name_reply(
+    sid: str,
+    q: str,
+    client_id: str | None,
+    *,
+    txt: dict,
+    service_payload,
+) -> dict | None:
+    if hard_reject_lead_name(q):
+        return service_payload(
+            txt["lead_name_hard"],
+            sid,
+            client_id,
+            lead_flow=True,
+            lead_step="name",
+        )
+    name = extract_name(q)
+    if not name:
+        return service_payload(
+            txt["lead_name_retry"],
+            sid,
+            client_id,
+            lead_flow=True,
+            lead_step="name",
+        )
+    label = classify_lead_name_shape(name, q, client_id=client_id, sid=sid)
+    if label == "invalid_name":
+        return service_payload(
+            txt["lead_name_invalid"],
+            sid,
+            client_id,
+            lead_flow=True,
+            lead_step="name",
+        )
+    if label == "unsure":
+        set_lead_pending_name(sid, name)
+        set_lead_intent(sid, "confirming_name")
+        return service_payload(
+            txt["lead_name_confirm_tpl"].format(name=name),
+            sid,
+            client_id,
+            lead_flow=True,
+            lead_step="confirm_name",
+            quick_replies=_name_confirm_quick_replies(),
+        )
+    update_profile(sid, name=name)
+    set_lead_intent(sid, "collecting_phone")
+    return service_payload(
+        txt["lead_phone_prompt_tpl"].format(name=name),
+        sid,
+        client_id,
+        lead_flow=True,
+        lead_step="phone",
+    )
+
+
+def _handle_lead_name_confirm(
+    *,
+    data: dict,
+    sid: str,
+    q: str,
+    client_id: str | None,
+    txt: dict,
+    service_payload,
+) -> dict | None:
+    ref = (data.get("ref") or "").strip()
+    pending = get_lead_pending_name(sid)
+    yes = ref == _LEAD_NAME_CONFIRM_YES or parse_yes(q)
+    no = ref == _LEAD_NAME_CONFIRM_NO or parse_no(q)
+
+    if yes and pending:
+        update_profile(sid, name=pending)
+        set_lead_pending_name(sid, None)
+        set_lead_intent(sid, "collecting_phone")
+        return {
+            "payload": service_payload(
+                txt["lead_phone_prompt_tpl"].format(name=pending),
+                sid,
+                client_id,
+                lead_flow=True,
+                lead_step="phone",
+            ),
+            "doc_id": None,
+        }
+
+    if no:
+        set_lead_pending_name(sid, None)
+        set_lead_intent(sid, "collecting_name")
+        return {
+            "payload": service_payload(
+                txt["lead_name_reenter"],
+                sid,
+                client_id,
+                lead_flow=True,
+                lead_step="name",
+            ),
+            "doc_id": None,
+        }
+
+    if q.strip() and len(q.strip()) > 1 and not yes:
+        set_lead_pending_name(sid, None)
+        set_lead_intent(sid, "collecting_name")
+        payload = _collecting_name_reply(
+            sid, q, client_id, txt=txt, service_payload=service_payload
+        )
+        if payload is not None:
+            return {"payload": payload, "doc_id": None}
+
+    if pending:
+        return {
+            "payload": service_payload(
+                txt["lead_name_confirm_tpl"].format(name=pending),
+                sid,
+                client_id,
+                lead_flow=True,
+                lead_step="confirm_name",
+                quick_replies=_name_confirm_quick_replies(),
+            ),
+            "doc_id": None,
+        }
+
+    set_lead_intent(sid, "collecting_name")
+    return {
+        "payload": service_payload(
+            txt["lead_name_prompt"],
+            sid,
+            client_id,
+            lead_flow=True,
+            lead_step="name",
+        ),
+        "doc_id": None,
+    }
 
 
 def _lead_flow_payload(
@@ -29,22 +178,7 @@ def _lead_flow_payload(
     intent = (st.get("lead_intent") or "none").strip()
 
     if intent == "collecting_name":
-        name = extract_name(q)
-        if not name:
-            return service_payload(
-                txt["lead_name_retry"],
-                sid,
-                client_id,
-                lead_flow=True,
-            )
-        update_profile(sid, name=name)
-        set_lead_intent(sid, "collecting_phone")
-        return service_payload(
-            txt["lead_phone_prompt_tpl"].format(name=name),
-            sid,
-            client_id,
-            lead_flow=True,
-        )
+        return _collecting_name_reply(sid, q, client_id, txt=txt, service_payload=service_payload)
 
     if intent == "collecting_phone":
         phone = extract_phone(q)
@@ -54,9 +188,11 @@ def _lead_flow_payload(
                 sid,
                 client_id,
                 lead_flow=True,
+                lead_step="phone",
             )
         update_profile(sid, phone=phone)
-        prof = mem_get(sid).get("profile") or {}
+        st2 = mem_get(sid)
+        prof = st2.get("profile") or {}
         lead_payload, lead_status = handle_lead(
             {
                 "name": (prof.get("name") or "").strip(),
@@ -64,7 +200,7 @@ def _lead_flow_payload(
                 "intent": "lead",
                 "sid": sid,
                 "client_id": client_id,
-                "situation_note": (st.get("situation_note") or "").strip(),
+                "situation_note": (st2.get("situation_note") or "").strip(),
             }
         )
         if lead_status != 200:
@@ -73,6 +209,7 @@ def _lead_flow_payload(
                 sid,
                 client_id,
                 lead_flow=True,
+                lead_step="phone",
                 lead_error=lead_payload.get("error_code") or lead_payload.get("error"),
             )
         set_lead_intent(sid, "submitted")
@@ -83,6 +220,7 @@ def _lead_flow_payload(
             sid,
             client_id,
             lead_flow=True,
+            lead_step="done",
         )
     return None
 
@@ -139,7 +277,17 @@ def handle_flows(
             "doc_id": st.get("current_doc_id"),
         }
 
-    if q and booking_intent(q) and not is_active_lead_flow(st):
+    if st.get("lead_intent") == "confirming_name":
+        return _handle_lead_name_confirm(
+            data=data,
+            sid=sid,
+            q=q,
+            client_id=client_id,
+            txt=txt,
+            service_payload=service_payload,
+        )
+
+    if q and booking_intent(q, sid=sid, client_id=client_id) and not is_active_lead_flow(st):
         set_lead_intent(sid, "collecting_name")
         return {
             "payload": service_payload(
@@ -147,19 +295,18 @@ def handle_flows(
                 sid,
                 client_id,
                 lead_flow=True,
+                lead_step="name",
                 booking_intent_flag=True,
             ),
             "doc_id": None,
         }
 
-    # Practical rule:
-    # - "yes" can auto-redirect only when a single subtopic button is present
-    # - with 2+ buttons, ask user to choose explicitly and repeat options
     if (
         st.get("last_bot_action") == "offered_subtopic"
         and q
         and len(q.strip().split()) <= 3
         and parse_yes(q)
+        and st.get("lead_intent") != "confirming_name"
     ):
         buttons = [b for b in (st.get("last_presented_buttons") or []) if b.get("ref")]
         if len(buttons) == 1:
@@ -212,6 +359,7 @@ def handle_flows(
                 sid,
                 client_id,
                 lead_flow=True,
+                lead_step="name",
             ),
             "doc_id": None,
         }
@@ -224,6 +372,7 @@ def handle_flows(
                 sid,
                 client_id,
                 lead_flow=True,
+                lead_step="name",
             ),
             "doc_id": None,
         }
@@ -262,6 +411,7 @@ def handle_flows(
                 sid,
                 client_id,
                 lead_flow=True,
+                lead_step="name",
             ),
             "doc_id": None,
         }

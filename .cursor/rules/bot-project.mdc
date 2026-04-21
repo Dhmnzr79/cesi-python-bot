@@ -1,88 +1,137 @@
 ---
-description: Flask RAG bot — архитектура, API, жёсткие запреты; всегда до работы с кодом
-alwaysApply: true
+description: Flask RAG-бот — архитектура, API /ask, запреты (подключается при работе с Python)
+globs: "**/*.py"
+alwaysApply: false
 ---
-
 # Bot Project — Cursor Rules
 
+Правило подхватывается при открытых/редактируемых **`*.py`**. Чистый виджет в `static/` — **`frontend-ui.mdc`** + **`work_info/widget.md`**.
+
 ## Проект
-Flask + OpenAI RAG-бот. Multi-tenant через `client_id`.
-Контент: `md/{client_id}/`. Индексы: `data/{client_id}/`.
+
+Flask + OpenAI RAG-бот. Multi-tenant через **`client_id`** (список `ALLOWED_CLIENTS` / `DEFAULT_CLIENT_ID` в `config.py`, разрешение через **`resolve_client_id()`**).
+
+Контент: `md/{client_id}/` (и fallback на корень `md/` для default-клиента). Индексы и SQLite: под `data/` (см. `config.py`: `DATA_DIR`, `SQLITE_PATH`).
+
+ТЗ виджета и нюансы фронта к полям ответа: **`work_info/widget.md`**.
 
 ---
 
 ## Структура файлов — не нарушать
 
 ```
-app.py          → только Flask-роуты, никакой логики
-retriever.py    → embed, retrieve, rerank
-llm.py          → промпты и вызовы OpenAI
-session.py      → весь session state
-policy.py       → детерминированные правила (без LLM)
-ux_builder.py   → только build_response()
-lead_service.py → валидация лида, webhook → n8n
-config.py       → все константы и пути
+app.py             → только Flask-роуты, без бизнес-логики
+flow_handlers.py   → ветки /ask: lead, situation, «да», cta_action, ref-редиректы
+chunk_responder.py → chunk → LLM → policy → session side-effects → JSON
+query_selector.py  → выбор чанка / режимы no_candidates, low_score
+retriever.py       → embed, retrieve, rerank
+llm.py             → промпты и вызовы OpenAI
+session.py         → состояние сессии (SQLite), sid, topic_state, last_bot_action
+policy.py          → детерминированные правила слотов (без LLM)
+ux_builder.py      → сборка тела успешного ответа /ask (build_ask_response, normalize_policy_payload и др.)
+meta_loader.py     → YAML frontmatter из md, пути к файлам
+lead_service.py    → приём лида: валидация, SMTP e-mail, fallback запись в `leads/`
+config.py          → константы, пути, resolve_client_id, regex намерений
 ```
 
 ---
 
 ## Жёсткие запреты
 
-- НЕ добавлять логику в `app.py` — только роуты
-- НЕ вызывать OpenAI вне `llm.py` и `retriever.py`
-- НЕ принимать бизнес-решения в LLM — только в `policy.py`
-- НЕ дублировать блоки кода — повторение → отдельная функция
-- НЕ использовать `print()` — только `log_json(logger, ...)`
-- НЕ хардкодить модели, пути, строки — всё в `config.py`
-- НЕ использовать `except: pass` — всегда логировать ошибку
-- НЕ создавать новые файлы без явного запроса
-- НЕ переписывать рабочий код если задача не требует
+- НЕ добавлять бизнес-логику в `app.py` — только роуты и склейка вызовов.
+- НЕ вызывать OpenAI вне `llm.py` и `retriever.py`.
+- НЕ переносить сценарные решения в LLM — слоты и ограничения в `policy.py` и `flow_handlers.py`.
+- НЕ дублировать блоки кода — повторение → отдельная функция.
+- НЕ использовать `print()` — только `log_json(logger, ...)`.
+- НЕ хардкодить модели, пути, чувствительные строки — опираться на `config.py` / env.
+- НЕ использовать `except: pass` — логировать ошибку.
+- НЕ создавать новые файлы без явного запроса пользователя.
+- НЕ переписывать рабочий код без необходимости задачи.
 
 ---
 
-## Обязательно в каждом запросе
+## Валидация и логи (паттерн)
 
 ```python
-# Валидация client_id — первое в каждом роуте
-client_id = data.get("client_id", "").strip()
-if client_id not in ALLOWED_CLIENTS:
+from config import resolve_client_id
+
+client_id = resolve_client_id(data.get("client_id"))
+if client_id is None:
     return jsonify({"error": "unknown_client"}), 403
 
-# Секреты — только из .env
-os.getenv("OPENAI_API_KEY")  # не строкой в коде
+# Секреты — только из окружения
+os.getenv("OPENAI_API_KEY")
 
-# Логи — структурированно с client_id и sid
+# Логи — структурированно
 log_json(logger, "event", client_id=client_id, sid=sid, ...)
 
-# Ошибки — generic для пользователя, детали в лог
-logger.exception("failed", extra={"q": q[:100]})
-return jsonify({"answer": "Не удалось ответить."}), 200
+# Ошибки: пользователю обезличенно, детали в лог
+logger.exception("failed", extra={"q": (q or "")[:100]})
 ```
 
 ---
 
-## API-контракт — не менять структуру
+## API `POST /ask` — контракт (не путать с устаревшими схемами)
+
+**Запрос** (основные поля):
 
 ```json
-// Запрос
-{ "q": "...", "ref": "file.md#section", "sid": "uuid", "client_id": "..." }
-
-// Ответ — всегда через build_response()
 {
-  "answer": "...",
-  "followups": [{ "label": "...", "ref": "file.md#section" }],
-  "cta": { "text": "...", "action": "booking" },
-  "video": { "title": "...", "url": "..." },
-  "situation": { "show": true },
-  "meta": { "file": "...", "score": 0.87, "turn_count": 2, "sid": "...", "client_id": "..." }
+  "q": "текст или /reset",
+  "ref": "file.md#anchor",
+  "sid": "uuid или пусто",
+  "client_id": "разрешённый id",
+  "cta_action": "lead",
+  "situation_action": "start | back",
+  "action": "situation"
 }
 ```
+
+Поля `cta_action` / `situation_action` / `action` обрабатываются в `flow_handlers.handle_flows` до retrieval.
+
+**Ответ** — единая структура после `chunk_responder` / `flow_handlers` / `ux_builder` + `apply_response_policy`:
+
+```json
+{
+  "answer": "string",
+  "quick_replies": [{ "label": "string", "ref": "file.md#anchor" }],
+  "cta": { "text": "string", "action": "lead" } | null,
+  "video": { "key": "string" } | null,
+  "situation": { "show": true, "mode": "normal" | "pending" },
+  "offer": null,
+  "meta": {
+    "followups": [{ "label": "string", "ref": "file.md#anchor" }],
+    "sid": "string",
+    "client_id": "string",
+    "file": "string",
+    "h2_id": "string",
+    "h3_id": "string",
+    "score": 0.0,
+    "turn_count": 0,
+    "session_turn_count": 0,
+    "lead_flow": true,
+    "situation_collect": true,
+    "policy_decision": {},
+    "ui_dropped": [],
+    "…": "…"
+  }
+}
+```
+
+**Важно для фронта и для правил:**
+
+- Подтемы — **`meta.followups`**, не корневое поле `followups`.
+- **`quick_replies`** в корне — это **suggest_ref** после policy, не то же самое, что followups.
+- **`video`** с бэка — объект с **`key`** (`video_key` из YAML), без гарантированных `url` / `title` в JSON.
+- **`cta.action`** в контенте обычно **`lead`**, не выдумывать `booking`, если в md не задано иное.
+
+Отдельно: **`POST /lead`** — прямой приём лида; основной сценарий имени/телефона идёт через **`/ask`** и `handle_lead` внутри `flow_handlers`.
 
 ---
 
 ## Перед тем как писать код
 
 1. В какой файл идёт изменение?
-2. Не нарушает ли API-контракт?
+2. Совпадает ли JSON с контрактом выше и с `ux_builder` / `policy.apply_response_policy`?
 3. Не дублирует ли существующую функцию?
-4. Передан ли `client_id` если функция работает с данными клиента?
+4. Передан ли `client_id` там, где нужен доступ к данным клиента / корпусу?

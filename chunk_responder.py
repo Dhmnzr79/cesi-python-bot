@@ -26,9 +26,7 @@ from session import (
 )
 from ux_builder import build_ask_response, normalize_policy_payload
 
-_POLICY_SUPPORTS_PRE_DOC_TURN = "pre_doc_turn_count" in inspect.signature(
-    apply_response_policy
-).parameters
+_APPLY_POLICY_PARAMS = inspect.signature(apply_response_policy).parameters
 
 
 def _mark_suggest_ref_used_compat(sid: str, doc_id: str, used: bool = True) -> None:
@@ -71,23 +69,23 @@ def _apply_response_policy_compat(
     topic_state: dict,
     doc_meta: dict,
     pre_doc_turn_count: int | None,
+    session_id: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
-    if _POLICY_SUPPORTS_PRE_DOC_TURN:
-        return apply_response_policy(
-            payload,
-            session_state,
-            q,
-            topic_state=topic_state,
-            doc_meta=doc_meta,
-            pre_doc_turn_count=pre_doc_turn_count,
-        )
-    return apply_response_policy(
-        payload,
-        session_state,
-        q,
-        topic_state=topic_state,
-        doc_meta=doc_meta,
-    )
+    kw: dict = {
+        "payload": payload,
+        "session_state": session_state,
+        "q": q,
+        "topic_state": topic_state,
+        "doc_meta": doc_meta,
+    }
+    if "pre_doc_turn_count" in _APPLY_POLICY_PARAMS:
+        kw["pre_doc_turn_count"] = pre_doc_turn_count
+    if "session_id" in _APPLY_POLICY_PARAMS:
+        kw["session_id"] = session_id
+    if "client_id" in _APPLY_POLICY_PARAMS:
+        kw["client_id"] = client_id
+    return apply_response_policy(**kw)
 
 
 def chunk_context_md_for_llm(chunk: dict) -> str:
@@ -180,6 +178,8 @@ def respond_from_chunk(
         topic_state=tstate,
         doc_meta=meta,
         pre_doc_turn_count=pre_turn,
+        session_id=sid,
+        client_id=client_id,
     )
     refs_before_ui = list(payload.get("quick_replies") or [])
     payload = normalize_policy_payload(payload)

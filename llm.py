@@ -6,9 +6,12 @@ import re
 from openai import OpenAI
 
 from config import (
+    BOOKING_INTENT_LLM_MODEL,
+    BOOKING_INTENT_LLM_ON,
     CHAT_JSON_MODE,
     CHAT_MODEL,
     EMPATHY_ON,
+    LEAD_NAME_CLASSIFY_MODEL,
     MEMORY_ON,
     OPENAI_API_KEY,
     QUERY_REWRITE_MAX_MESSAGES,
@@ -299,3 +302,123 @@ def generate_answer_with_empathy(
     update_topic_empathy(session_id, doc_key, use_empathy)
 
     return answer, profile
+
+
+_NAME_CLASSIFY_SYSTEM = (
+    "Ты классификатор короткой строки на шаге «как к вам обращаться» в чате стоматологии. "
+    "Нужно решить, пригодна ли строка как личное обращение к человеку.\n"
+    "Значения label:\n"
+    "- valid_name — нормальное имя или обращение (имя, имя и отчество, имя и фамилия, "
+    "в т.ч. латиница вроде Kai Chen).\n"
+    "- invalid_name — явно не имя: вопрос по клинике/лечению, оскорбление или псевдо-фамилия для троллинга, "
+    "служебный текст вместо имени.\n"
+    "- unsure — формально похоже на имя (1–3 коротких слова), но смысл неоднозначен: ник, шутка, "
+    "нарицательное слово как обращение (например «Рыба», «Лиса»).\n"
+    'Ответь одним JSON-объектом с ключом "label" и значением ровно одним из: '
+    '"valid_name", "invalid_name", "unsure". Без markdown и текста вне JSON.'
+)
+
+
+def classify_lead_name_shape(
+    candidate: str, raw_user: str, *, client_id: str | None, sid: str
+) -> str:
+    """Только для строк, прошедших жёсткий предфильтр и extract_name."""
+    c = (candidate or "").strip()
+    r = (raw_user or "").strip()
+    if not c:
+        return "invalid_name"
+    payload = json.dumps({"candidate": c, "original": r}, ensure_ascii=False)
+    try:
+        resp = client.chat.completions.create(
+            model=LEAD_NAME_CLASSIFY_MODEL,
+            temperature=0,
+            max_tokens=60,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _NAME_CLASSIFY_SYSTEM},
+                {"role": "user", "content": payload},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("name_classify_not_object")
+        label = str(obj.get("label") or "").strip().lower()
+        if label in ("valid_name", "invalid_name", "unsure"):
+            log_json(
+                logger,
+                "lead_name_classify",
+                client_id=client_id,
+                sid=sid,
+                label=label,
+                candidate=c[:80],
+            )
+            return label
+    except Exception as e:
+        log_json(
+            logger,
+            "lead_name_classify_failed",
+            client_id=client_id,
+            sid=sid,
+            err=str(e)[:300],
+            candidate=c[:80],
+        )
+    return "unsure"
+
+
+_BOOKING_INTENT_SYSTEM = (
+    "Ты классификатор намерения в чате стоматологии. Пользователь только что написал одну реплику.\n"
+    "wants_booking = true, если он явно хочет записаться на приём/консультацию, оставить заявку на связь, "
+    "попросить записать его сейчас (в т.ч. с опечатками: «записатся», «зописаться», «хачу записаться»).\n"
+    "wants_booking = false, если это вопрос по лечению, ценам, FAQ «как записаться / куда звонить», "
+    "общая консультация без явной просьбы записать именно его, или просто болтовня.\n"
+    'Ответь одним JSON-объектом с ключом "wants_booking" (boolean true или false). '
+    "Без markdown и текста вне JSON."
+)
+
+
+def classify_booking_wants_appointment(
+    user_message: str, *, client_id: str | None, sid: str
+) -> bool:
+    if not BOOKING_INTENT_LLM_ON:
+        return False
+    msg = (user_message or "").strip()
+    if len(msg) < 2:
+        return False
+    try:
+        resp = client.chat.completions.create(
+            model=BOOKING_INTENT_LLM_MODEL,
+            temperature=0,
+            max_tokens=40,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _BOOKING_INTENT_SYSTEM},
+                {"role": "user", "content": msg[:600]},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("booking_intent_not_object")
+        wb = obj.get("wants_booking")
+        out = wb is True or str(wb).lower() in ("true", "1", "yes")
+        log_json(
+            logger,
+            "booking_intent_llm",
+            client_id=client_id,
+            sid=sid,
+            wants_booking=out,
+            msg_len=len(msg),
+        )
+        return out
+    except Exception as e:
+        log_json(
+            logger,
+            "booking_intent_llm_failed",
+            client_id=client_id,
+            sid=sid,
+            err=str(e)[:300],
+        )
+        return False

@@ -1,5 +1,6 @@
-"""Детерминированные правила до/после LLM (без вызова модели)."""
-from config import BOOKING_INTENT_RE, CONTACTS_RE, PRICES_RE
+"""Детерминированные правила до/после LLM; намерение записи — regex + при необходимости LLM."""
+from config import BOOKING_INTENT_LLM_ON, BOOKING_INTENT_RE, CONTACTS_RE, PRICES_RE
+from llm import classify_booking_wants_appointment
 from retriever import chunk_doc_type
 from session import is_active_lead_flow
 
@@ -12,8 +13,19 @@ def price_intent(q: str) -> bool:
     return bool(PRICES_RE.search(q or ""))
 
 
-def booking_intent(q: str) -> bool:
-    return bool(BOOKING_INTENT_RE.search(q or ""))
+def booking_intent(
+    q: str, *, sid: str | None = None, client_id: str | None = None
+) -> bool:
+    q0 = (q or "").strip()
+    if len(q0) < 2:
+        return False
+    if BOOKING_INTENT_RE.search(q0):
+        return True
+    if not BOOKING_INTENT_LLM_ON:
+        return False
+    return classify_booking_wants_appointment(
+        q0[:600], client_id=client_id, sid=sid or ""
+    )
 
 
 def pick_contacts_chunk(cands: list) -> dict | None:
@@ -49,11 +61,13 @@ def build_policy_decision(
     doc_meta: dict,
     q: str,
     pre_doc_turn_count: int | None = None,
+    session_id: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
     meta = payload.get("meta") or {}
     low_score = bool(meta.get("low_score"))
     lead_flow_active = is_active_lead_flow(session_state)
-    booking = booking_intent(q)
+    booking = booking_intent(q, sid=session_id, client_id=client_id)
     exhausted = _is_topic_exhausted(doc_meta, topic_state)
     doc_turn_after = int(topic_state.get("doc_turn_count") or 0)
     doc_turn_before = (
@@ -209,6 +223,8 @@ def apply_response_policy(
     topic_state: dict | None = None,
     doc_meta: dict | None = None,
     pre_doc_turn_count: int | None = None,
+    session_id: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
     topic_state = topic_state or {}
     doc_meta = doc_meta or {}
@@ -219,6 +235,8 @@ def apply_response_policy(
         doc_meta=doc_meta,
         q=q,
         pre_doc_turn_count=pre_doc_turn_count,
+        session_id=session_id,
+        client_id=client_id,
     )
 
     payload["quick_replies"] = decision["refs"] if decision["show_refs"] else []

@@ -11,6 +11,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMB_MODEL = os.getenv("MODEL_EMBED", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("MODEL_CHAT", "gpt-4o-mini")
 QUERY_REWRITE_MODEL = (os.getenv("MODEL_QUERY_REWRITE") or "").strip() or CHAT_MODEL
+LEAD_NAME_CLASSIFY_MODEL = (os.getenv("MODEL_LEAD_NAME") or "").strip() or CHAT_MODEL
+
+# --- Намерение «записаться» (regex + при необходимости LLM) ---
+BOOKING_INTENT_LLM_ON = os.getenv("BOOKING_INTENT_LLM_ON", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+BOOKING_INTENT_LLM_MODEL = (os.getenv("BOOKING_INTENT_LLM_MODEL") or "").strip() or CHAT_MODEL
 QUERY_REWRITE_ON = os.getenv("QUERY_REWRITE_ON", "1").lower() in ("1", "true", "yes")
 QUERY_REWRITE_MAX_MESSAGES = int(os.getenv("QUERY_REWRITE_MAX_MESSAGES", "10"))
 # Подстроки в ответе rewrite → отбросить (утечка инструкции / мусор). Разделитель |

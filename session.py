@@ -61,6 +61,7 @@ def _fresh_defaults() -> dict:
         "situation_pending": False,
         "situation_note": "",
         "lead_intent": "none",
+        "lead_pending_name": "",
         "shown_cta_topics": [],
         "topic_state": {},
         "last_content_ui_payload": None,
@@ -239,6 +240,7 @@ def is_active_lead_flow(session_state: dict) -> bool:
     return (session_state or {}).get("lead_intent") in {
         "collecting_name",
         "collecting_phone",
+        "confirming_name",
     }
 
 
@@ -415,6 +417,35 @@ def parse_yes(text: str) -> bool:
     return bool(YES_RX.search((text or "").strip()))
 
 
+def parse_no(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t or len(t) > 48:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(нет|неа|ну\s+нет|не\s+так|другой|другая|другим|по[- ]другому|изменить|введу\s+заново|отмена)[\s,.!?-]*",
+            t,
+            flags=re.I,
+        )
+    )
+
+
+def set_lead_pending_name(session_id: str, name: str | None) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        v = (name or "").strip()
+        if v:
+            st["lead_pending_name"] = v
+        else:
+            st["lead_pending_name"] = ""
+        _persist_unlocked(session_id, st)
+
+
+def get_lead_pending_name(session_id: str) -> str:
+    st = mem_get(session_id)
+    return (st.get("lead_pending_name") or "").strip()
+
+
 # Токены, которые нельзя принимать за имя после «я …» / однословный ответ.
 _LEAD_NAME_REJECT = frozenset(
     {
@@ -495,10 +526,8 @@ def extract_name(text: str) -> str | None:
 
 
 def extract_phone(text: str) -> str | None:
-    m = PHONE_RX.search(text or "")
-    if not m:
-        return None
-    return normalize_phone(m.group(0))
+    """Допускает ввод с маской +7(###) ###-##-## и любые нецифровые разделители."""
+    return normalize_phone(text or "")
 
 
 def normalize_phone(text: str) -> str | None:

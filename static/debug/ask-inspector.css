@@ -1,0 +1,141 @@
+/* Временная dev-страница: изолированные стили */
+.ask-insp {
+  --ask-border: #e2e8f0;
+  --ask-muted: #64748b;
+  --ask-bg: #f8fafc;
+  font-family: system-ui, sans-serif;
+  line-height: 1.45;
+  color: #0f172a;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.ask-insp h1 {
+  font-size: 1.35rem;
+  margin: 0 0 8px;
+}
+
+.ask-insp .ask-insp__lead {
+  color: var(--ask-muted);
+  font-size: 0.9rem;
+  margin: 0 0 20px;
+}
+
+.ask-insp .ask-insp__tight {
+  margin-bottom: 8px;
+}
+
+.ask-insp section {
+  background: #fff;
+  border: 1px solid var(--ask-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.ask-insp h2 {
+  font-size: 1rem;
+  margin: 0 0 10px;
+}
+
+.ask-insp .ask-insp__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.ask-insp label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--ask-muted);
+}
+
+.ask-insp .ask-insp__label-grow {
+  flex: 1;
+  min-width: 240px;
+}
+
+.ask-insp input[type="text"],
+.ask-insp input[type="password"] {
+  min-width: 200px;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid var(--ask-border);
+  border-radius: 8px;
+}
+
+.ask-insp button[type="button"] {
+  padding: 8px 14px;
+  font-size: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--ask-border);
+  background: var(--ask-bg);
+  cursor: pointer;
+}
+
+.ask-insp button[type="button"]:hover {
+  background: #e2e8f0;
+}
+
+.ask-insp #askInspChat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ask-insp .ask-insp__msg {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ask-border);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+}
+
+.ask-insp .ask-insp__msg--user {
+  background: #e0f2fe;
+}
+
+.ask-insp .ask-insp__msg--bot {
+  background: #f1f5f9;
+}
+
+.ask-insp .ask-insp__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ask-insp pre {
+  margin: 0;
+  padding: 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 420px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ask-insp .ask-insp__sid {
+  font-size: 0.85rem;
+  color: var(--ask-muted);
+}
+
+.ask-insp textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 10px;
+  font-family: inherit;
+  font-size: 14px;
+  border: 1px solid var(--ask-border);
+  border-radius: 8px;
+  box-sizing: border-box;
+}

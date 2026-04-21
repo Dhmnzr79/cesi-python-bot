@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask inspector (dev)</title>
+  <link rel="stylesheet" href="ask-inspector.css">
+</head>
+<body class="ask-insp">
+  <main>
+    <h1>Инспектор <code>/ask</code> + retrieval</h1>
+    <p class="ask-insp__lead">
+      Временная dev-страница — удалите папку <code>static/debug/</code>, когда не нужна.
+      Откройте с того же хоста, что и Flask (например <code>http://127.0.0.1:9000/static/debug/ask-inspector.html</code>).
+      Для <code>/__debug/retrieval</code> нужен заголовок <code>X-Debug-Token</code> = значение <code>DEBUG_TOKEN</code> из <code>.env</code> (если поле пустое, запрос уйдёт с дефолтом <code>dev-debug</code>, как в <code>config.py</code>).
+    </p>
+
+    <section aria-labelledby="ask-insp-cfg">
+      <h2 id="ask-insp-cfg">Параметры</h2>
+      <div class="ask-insp__row">
+        <label>
+          client_id
+          <input id="askInspClient" type="text" value="default" autocomplete="off">
+        </label>
+        <label>
+          DEBUG_TOKEN (опционально)
+          <input id="askInspToken" type="password" autocomplete="off" placeholder="для /__debug/retrieval">
+        </label>
+        <button type="button" id="askInspSaveToken">Запомнить токен</button>
+      </div>
+      <div class="ask-insp__row">
+        <label class="ask-insp__label-grow">
+          Вопрос
+          <input id="askInspQ" type="text" placeholder="Текст вопроса" autocomplete="off">
+        </label>
+        <button type="button" id="askInspSend">Отправить</button>
+        <button type="button" id="askInspReset">Новая сессия</button>
+      </div>
+      <p class="ask-insp__sid">SID: <span id="askInspSid">—</span></p>
+    </section>
+
+    <section aria-labelledby="ask-insp-chat-h">
+      <h2 id="ask-insp-chat-h">Диалог</h2>
+      <div id="askInspChat"></div>
+    </section>
+
+    <section aria-labelledby="ask-insp-qh">
+      <h2 id="ask-insp-qh">quick_replies (корень JSON)</h2>
+      <div id="askInspQuick" class="ask-insp__buttons"></div>
+    </section>
+
+    <section aria-labelledby="ask-insp-fh">
+      <h2 id="ask-insp-fh">meta.followups</h2>
+      <div id="askInspFollowups" class="ask-insp__buttons"></div>
+    </section>
+
+    <section aria-labelledby="ask-insp-cta-h">
+      <h2 id="ask-insp-cta-h">CTA</h2>
+      <div id="askInspCta" class="ask-insp__buttons"></div>
+    </section>
+
+    <section aria-labelledby="ask-insp-vid-h">
+      <h2 id="ask-insp-vid-h">Видео</h2>
+      <div id="askInspVideo"></div>
+    </section>
+
+    <section aria-labelledby="ask-insp-sit-h">
+      <h2 id="ask-insp-sit-h">Ситуация</h2>
+      <div id="askInspSituation"></div>
+    </section>
+
+    <section aria-labelledby="ask-insp-raw-h">
+      <h2 id="ask-insp-raw-h">Сырой JSON ответа</h2>
+      <pre id="askInspRaw" aria-live="polite"></pre>
+    </section>
+
+    <section aria-labelledby="ask-insp-dbg-h">
+      <h2 id="ask-insp-dbg-h">Кандидаты retrieval</h2>
+      <pre id="askInspDebug" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <script type="module" src="ask-inspector.js"></script>
+</body>
+</html>

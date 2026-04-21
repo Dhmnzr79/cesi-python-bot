@@ -42,12 +42,19 @@ from ux_builder import (
 app = Flask(__name__, static_folder="static")
 logger = get_logger("bot")
 APP_ENV = (os.getenv("APP_ENV") or "local").strip().lower()
-_POLICY_SUPPORTS_PRE_DOC_TURN = "pre_doc_turn_count" in inspect.signature(
-    apply_response_policy
-).parameters
+_APPLY_POLICY_PARAMS = inspect.signature(apply_response_policy).parameters
 TXT = {
     "lead_name_prompt": "Отлично. Как к вам можно обращаться?",
     "lead_name_retry": "Как к вам можно обращаться? Напишите, пожалуйста, имя.",
+    "lead_name_hard": (
+        "Похоже, это не имя для обращения (вопрос, телефон или другой текст). "
+        "Напишите, пожалуйста, как к вам обращаться — например: Мария или Денис Петров."
+    ),
+    "lead_name_invalid": (
+        "Не похоже на имя для обращения. Напишите, пожалуйста, как к вам можно обращаться — например: Мария."
+    ),
+    "lead_name_confirm_tpl": "Правильно, к вам можно обращаться «{name}»?",
+    "lead_name_reenter": "Хорошо. Как к вам можно обращаться?",
     "lead_phone_prompt_tpl": "Спасибо, {name}. Оставьте номер телефона для связи.",
     "lead_phone_retry": "Не получилось распознать номер. Напишите телефон в формате +7XXXXXXXXXX.",
     "lead_submit_ok": "Принято, передали заявку администратору. С вами свяжутся.",
@@ -78,24 +85,23 @@ def _apply_response_policy_compat(
     topic_state: dict,
     doc_meta: dict,
     pre_doc_turn_count: int | None,
+    session_id: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
-    if _POLICY_SUPPORTS_PRE_DOC_TURN:
-        return apply_response_policy(
-            payload,
-            session_state,
-            q,
-            topic_state=topic_state,
-            doc_meta=doc_meta,
-            pre_doc_turn_count=pre_doc_turn_count,
-        )
-    # Backward compatibility for older policy.py without pre_doc_turn_count.
-    return apply_response_policy(
-        payload,
-        session_state,
-        q,
-        topic_state=topic_state,
-        doc_meta=doc_meta,
-    )
+    kw: dict = {
+        "payload": payload,
+        "session_state": session_state,
+        "q": q,
+        "topic_state": topic_state,
+        "doc_meta": doc_meta,
+    }
+    if "pre_doc_turn_count" in _APPLY_POLICY_PARAMS:
+        kw["pre_doc_turn_count"] = pre_doc_turn_count
+    if "session_id" in _APPLY_POLICY_PARAMS:
+        kw["session_id"] = session_id
+    if "client_id" in _APPLY_POLICY_PARAMS:
+        kw["client_id"] = client_id
+    return apply_response_policy(**kw)
 
 
 def _service_reply(
@@ -121,6 +127,7 @@ def _service_payload(
     client_id: str | None,
     *,
     lead_flow: bool = False,
+    lead_step: str | None = None,
     situation_mode: str = "normal",
     situation_collect: bool = False,
     booking_intent_flag: bool = False,
@@ -132,6 +139,8 @@ def _service_payload(
     meta = {"sid": sid, "client_id": client_id}
     if lead_flow:
         meta["lead_flow"] = True
+    if lead_step:
+        meta["lead_step"] = lead_step
     if situation_collect:
         meta["situation_collect"] = True
     if booking_intent_flag:
@@ -336,6 +345,8 @@ def ask():
                 topic_state={},
                 doc_meta={},
                 pre_doc_turn_count=None,
+                session_id=sid,
+                client_id=client_id,
             )
             return _service_reply(pls, sid, q)
         if mode == "chunk":
