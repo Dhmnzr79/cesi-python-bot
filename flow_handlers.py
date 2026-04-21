@@ -99,7 +99,10 @@ def handle_flows(
     get_last_content_ui_payload,
     get_topic_state,
 ) -> dict | None:
-    """Return {'payload': dict, 'doc_id': str|None} when flow handled."""
+    """Return {'payload': dict, 'doc_id': str|None} when flow handled.
+
+    May also return {'redirect_ref': str} for followup redirect.
+    """
     if data.get("situation_action") == "back":
         set_situation_pending(sid, False)
         snap = get_last_content_ui_payload(sid)
@@ -148,6 +151,34 @@ def handle_flows(
             ),
             "doc_id": None,
         }
+
+    # Practical rule:
+    # - "yes" can auto-redirect only when a single subtopic button is present
+    # - with 2+ buttons, ask user to choose explicitly and repeat options
+    if (
+        st.get("last_bot_action") == "offered_subtopic"
+        and q
+        and len(q.strip().split()) <= 3
+        and parse_yes(q)
+    ):
+        buttons = [b for b in (st.get("last_presented_buttons") or []) if b.get("ref")]
+        if len(buttons) == 1:
+            return {"payload": None, "doc_id": None, "redirect_ref": buttons[0]["ref"]}
+        if len(buttons) >= 2:
+            quick_replies = [
+                {"label": (b.get("label") or "").strip(), "ref": b.get("ref")}
+                for b in buttons[:2]
+                if (b.get("label") or "").strip() and b.get("ref")
+            ]
+            return {
+                "payload": service_payload(
+                    txt["followup_choose_topic"],
+                    sid,
+                    client_id,
+                    quick_replies=quick_replies,
+                ),
+                "doc_id": st.get("current_doc_id"),
+            }
 
     if is_active_lead_flow(st):
         payload = _lead_flow_payload(

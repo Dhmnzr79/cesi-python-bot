@@ -20,8 +20,6 @@ from config import (
 from logging_setup import get_logger, log_json
 from session import (
     is_first_in_topic,
-    mem_add_bot,
-    mem_add_user,
     mem_context,
     mem_get,
     update_topic_empathy,
@@ -213,6 +211,19 @@ def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id:
 
     use_empathy = bool(allow_empathy and (first_in_topic or emotional))
     system_prompt = BASE_SYSTEM + (EMPATHY_ADDON if use_empathy else "")
+    if meta.get("verbatim"):
+        system_prompt += (
+            " Используй только точные формулировки из предоставленного контента, "
+            "не перефразируй."
+        )
+    pref_fmt = meta.get("preferred_format") or []
+    if isinstance(pref_fmt, str):
+        pref_fmt = [pref_fmt]
+    pref_fmt = [str(x).strip().lower() for x in pref_fmt if str(x).strip()]
+    if "bullets" in pref_fmt:
+        system_prompt += " Структурируй ответ в виде коротких пунктов."
+    elif "paragraph" in pref_fmt:
+        system_prompt += " Отвечай связным текстом без списков."
     if CHAT_JSON_MODE:
         system_prompt += JSON_ANSWER_RULE
 
@@ -240,7 +251,6 @@ def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id:
 def generate_answer_with_empathy(
     user_q: str, context_md: str, meta: dict, session_id: str
 ) -> tuple[str, dict]:
-    mem_add_user(session_id, user_q)
     mem_txt, profile = mem_context(session_id)
 
     messages, use_empathy, doc_key = build_messages_for_gpt(
@@ -250,7 +260,7 @@ def generate_answer_with_empathy(
     if mem_txt and MEMORY_ON:
         for msg in messages:
             if msg["role"] == "user":
-                msg["content"] = f"Недавний диалог:\n{mem_txt}\n\n" + msg["content"]
+                msg["content"] = f"{mem_txt}\n\n" + msg["content"]
                 break
 
     kwargs = dict(model=CHAT_MODEL, temperature=0.3, messages=messages)
@@ -267,7 +277,6 @@ def generate_answer_with_empathy(
         except (json.JSONDecodeError, TypeError):
             pass
 
-    mem_add_bot(session_id, answer)
     update_topic_empathy(session_id, doc_key, use_empathy)
 
     return answer, profile

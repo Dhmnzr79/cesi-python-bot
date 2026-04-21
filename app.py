@@ -58,6 +58,7 @@ TXT = {
     "situation_retry_short": "Чтобы помочь точнее, напишите коротко вашу ситуацию в 1–2 фразах.",
     "situation_to_lead_name": "Спасибо. Как к вам можно обращаться?",
     "situation_back_fallback": "Хорошо, продолжим. Задайте вопрос или выберите тему.",
+    "followup_choose_topic": "Могу рассказать про этапы или про сроки — что выбрать?",
 }
 
 
@@ -274,6 +275,21 @@ def ask():
             get_topic_state=get_topic_state,
         )
         if flow_result is not None:
+            redirect_ref = (flow_result.get("redirect_ref") or "").strip()
+            if redirect_ref:
+                ch = get_chunk_by_ref(redirect_ref, client_id=client_id)
+                if ch:
+                    return respond_from_chunk(
+                        chunk=ch,
+                        q=q,
+                        sid=sid,
+                        client_id=client_id,
+                        finalize_ask=finalize_ask,
+                        safe_jsonify=safe_jsonify,
+                        logger=logger,
+                        llm_question=q or f"Информация из {redirect_ref}",
+                        log_event="Answer generated from flow redirect_ref",
+                    )
             return _service_reply(
                 flow_result["payload"],
                 sid,

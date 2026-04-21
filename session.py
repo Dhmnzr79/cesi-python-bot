@@ -12,7 +12,13 @@ from datetime import datetime
 from config import DATA_DIR, MAX_IDLE_SEC, MAX_TURNS, SQLITE_PATH
 
 PHONE_RX = re.compile(r"(?:\+7|8)?[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-()]?\d{2}[\s\-()]?\d{2}")
-YES_RX = re.compile(r"^(да|ага|угу|ok|ок|хорошо|давай|хочу|расскажу)\W*$", re.I)
+YES_RX = re.compile(
+    (
+        r"^(?:да[\s,!.?-]*)?(да|ага|угу|ok|ок|хорошо|давай|хочу|расскажу|конечно|ладно|можно|"
+        r"согласен|согласна|договорились|пожалуй)\W*$"
+    ),
+    re.I,
+)
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
@@ -477,6 +483,13 @@ def extract_name(text: str) -> str | None:
             return None
         t = s
         return (t[:1].upper() + t[1:].lower()) if len(t) > 1 else t.capitalize()
+
+    parts = s.split()
+    if len(parts) == 2 and all(_token_ok_for_name(p) for p in parts):
+        return " ".join(
+            (p[:1].upper() + p[1:].lower()) if len(p) > 1 else p.capitalize()
+            for p in parts
+        )
 
     return None
 

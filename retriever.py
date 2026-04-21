@@ -41,16 +41,18 @@ _RE_H3 = re.compile(r"^###\s+.*?\{#([a-z0-9\-]+)\}\s*$", re.I | re.M)
 _SECTION_CACHE: dict[str, dict] = {}
 _EMB: np.ndarray | None = None
 _EMB_LOAD_ERROR: str | None = None
+_ALIAS_INDEX: dict[str, list[dict]] | None = None
 
 
 def load_corpus_if_needed() -> list:
-    global _CORPUS
+    global _CORPUS, _ALIAS_INDEX
     if _CORPUS is None:
         try:
             with open(CORPUS_PATH, "r", encoding="utf-8") as f:
                 _CORPUS = [json.loads(line) for line in f if line.strip()]
         except FileNotFoundError:
             _CORPUS = []
+        _ALIAS_INDEX = _build_alias_index(_CORPUS)
     return _CORPUS
 
 
@@ -207,10 +209,6 @@ def _infer_section_ids(md_path: str, fragment: str) -> tuple[str | None, str | N
 
 
 def chunk_doc_type(item: Any) -> str | None:
-    try:
-        return getattr(item[0], "meta", {}).get("doc_type") or None
-    except Exception:
-        pass
     if isinstance(item, dict):
         dt = item.get("doc_type") or item.get("topic")
         if dt:
@@ -487,6 +485,43 @@ def _chunk_alias_terms(ch: dict) -> list[str]:
     return terms
 
 
+def _build_alias_index(corpus: list) -> dict[str, list[dict]]:
+    """Индекс по нормализованным alias-термам -> список чанков."""
+    idx: dict[str, list[dict]] = {}
+    for ch in corpus or []:
+        if not isinstance(ch, dict):
+            continue
+        seen_terms: set[str] = set()
+        for raw in _chunk_alias_terms(ch):
+            norm = _norm_text(raw)
+            if len(norm) < 2 or norm in seen_terms:
+                continue
+            seen_terms.add(norm)
+            idx.setdefault(norm, []).append(ch)
+    return idx
+
+
+def _alias_probe_terms(q: str) -> list[str]:
+    """Запросные ключи для alias-индекса: фраза, токены и биграммы ядра."""
+    probes: list[str] = []
+    qn = _norm_text(q)
+    if qn:
+        probes.append(qn)
+    core = _core_tokens(q)
+    probes.extend(core)
+    if len(core) >= 2:
+        probes.extend(f"{core[i]} {core[i + 1]}" for i in range(len(core) - 1))
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in probes:
+        pn = _norm_text(p)
+        if len(pn) < 2 or pn in seen:
+            continue
+        seen.add(pn)
+        out.append(pn)
+    return out
+
+
 def _alias_hit_score_raw_for_chunk(q: str, ch: dict) -> float:
     qn = _norm_text(q)
     if not qn:
@@ -676,11 +711,29 @@ def corpus_alias_leader(
 ) -> tuple[dict | None, float]:
     """Лучший чанк по алиасам и его score (без порога)."""
     corpus = load_corpus_if_needed()
+    alias_idx = _ALIAS_INDEX or {}
+    probe_terms = _alias_probe_terms(q)
+    candidate_map: dict[tuple, dict] = {}
+    for term in probe_terms:
+        for ch in alias_idx.get(term, []):
+            if client_id and ch.get("client_id") != client_id:
+                continue
+            key = (
+                ch.get("file"),
+                ch.get("h2_id") or ch.get("h2"),
+                ch.get("h3_id") or ch.get("h3"),
+            )
+            candidate_map[key] = ch
+    cands = list(candidate_map.values())
+    if not cands:
+        cands = [
+            ch
+            for ch in corpus
+            if isinstance(ch, dict) and (not client_id or ch.get("client_id") == client_id)
+        ]
     best_chunk = None
     best_score = 0.0
-    for ch in corpus:
-        if client_id and ch.get("client_id") != client_id:
-            continue
+    for ch in cands:
         sc = alias_hit_score_for_chunk(q, ch)
         if sc > best_score:
             best_score = sc
@@ -822,21 +875,68 @@ def llm_rerank(q: str, cands: list) -> dict:
     log_json(logger, "rerank", question=q[:200], candidates=cand_infos)
 
     prompt = (
-        "Выбери самый уместный фрагмент для ответа на вопрос пользователя. Ответи номером 1, 2 или 3."
+        "Выбери самый уместный фрагмент для ответа на вопрос пользователя. "
+        'Верни только JSON-объект вида {"choice": 1}, где choice — номер 1, 2 или 3.'
     )
+    def _cand_block(ch: dict) -> str:
+        if not isinstance(ch, dict):
+            return ""
+        return (
+            f"{(ch.get('h2') or '').strip()}\n"
+            f"{(ch.get('h3') or '').strip()}\n"
+            f"{(ch.get('text') or '')[:500]}"
+        ).strip()
     msgs = [
-        {"role": "system", "content": "Ты выбираешь лучший фрагмент."},
+        {
+            "role": "system",
+            "content": (
+                "Ты помощник стоматологической клиники. Тебе нужно выбрать фрагмент "
+                "из базы знаний, который наиболее точно отвечает на вопрос пациента. "
+                'Отвечай только JSON-объектом вида {"choice": 1}, где choice — 1, 2 или 3.'
+            ),
+        },
         {
             "role": "user",
-            "content": f"{prompt}\n\nВопрос: {q}\n\n1) {cands[0]['text'][:600]}\n\n2) {cands[1]['text'][:600] if len(cands) > 1 else ''}\n\n3) {cands[2]['text'][:600] if len(cands) > 2 else ''}",
+            "content": (
+                f"{prompt}\n\nВопрос: {q}\n\n"
+                f"1) {_cand_block(cands[0])}\n\n"
+                f"2) {_cand_block(cands[1]) if len(cands) > 1 else ''}\n\n"
+                f"3) {_cand_block(cands[2]) if len(cands) > 2 else ''}"
+            ),
         },
     ]
+    fallback_reason = None
     try:
-        out = client.chat.completions.create(model=CHAT_MODEL, messages=msgs, temperature=0)
-        n = "".join([ch for ch in out.choices[0].message.content if ch.isdigit()])[:1]
-        idx = int(n) - 1
-        result = cands[idx] if 0 <= idx < len(cands) else cands[0]
+        out = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=msgs,
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        raw = (out.choices[0].message.content or "").strip()
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            obj = None
+            fallback_reason = "invalid_json"
+        if not isinstance(obj, dict):
+            fallback_reason = fallback_reason or "invalid_json_object"
+            result = cands[0]
+        else:
+            choice = obj.get("choice")
+            if not isinstance(choice, int):
+                fallback_reason = "missing_or_nonint_choice"
+                result = cands[0]
+            else:
+                idx = int(choice) - 1
+                max_idx = min(3, len(cands)) - 1
+                if 0 <= idx <= max_idx:
+                    result = cands[idx]
+                else:
+                    fallback_reason = "choice_out_of_range"
+                    result = cands[0]
     except Exception:
+        fallback_reason = "api_error"
         result = cands[0]
 
     lat = int((time.time() - t0) * 1000)
@@ -844,6 +944,7 @@ def llm_rerank(q: str, cands: list) -> dict:
         logger,
         "rerank_result",
         latency_ms=lat,
+        fallback_reason=fallback_reason,
         chosen=chunk_info(
             result, result.get("_score") if isinstance(result, dict) else None
         ),

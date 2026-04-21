@@ -7,6 +7,13 @@ from config import DEFAULT_CLIENT_ID
 # front-matter между --- ... ---
 _FM_RE = re.compile(r'^---\s*\n(.*?)\n---\s*\n?', re.S)
 
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 def _read_file(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
@@ -48,6 +55,7 @@ def load_doc_meta(md_root: str = "md") -> dict:
                 "verbatim": bool(fm.get("verbatim", False)),
                 "cta_text": fm.get("cta_text"),
                 "cta_action": fm.get("cta_action"),
+                "cta_from_turn": _safe_int(fm.get("cta_from_turn", 0), 0),
                 "preferred_format": fm.get("preferred_format") or [],
                 "verbatim_ids": fm.get("verbatim_ids") or [],
                 "aliases": fm.get("aliases") or [],

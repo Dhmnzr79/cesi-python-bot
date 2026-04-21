@@ -83,6 +83,7 @@ def build_policy_decision(
     situation_allowed = bool(doc_meta.get("situation_allowed"))
     situation_offered = bool(topic_state.get("situation_offered"))
     ref_used = bool(topic_state.get("suggest_ref_used"))
+    cta_from_turn = max(0, int(doc_meta.get("cta_from_turn", 0) or 0))
 
     is_first_content_turn = doc_turn_before == 0
     max_follow_slots = 1 if has_video else 2
@@ -169,7 +170,7 @@ def build_policy_decision(
     show_cta = bool(cta) and not lead_flow_active and not bool(
         session_state.get("situation_pending")
     )
-    if show_cta and doc_turn_before < 1:
+    if show_cta and doc_turn_before < cta_from_turn:
         show_cta = False
     if show_cta and booking:
         show_cta = False
@@ -196,6 +197,7 @@ def build_policy_decision(
         "dropped": dropped,
         "doc_turn_before": doc_turn_before,
         "doc_turn_after": doc_turn_after,
+        "cta_from_turn": cta_from_turn,
     }
 
 
@@ -246,5 +248,6 @@ def apply_response_policy(
         "dropped": decision["dropped"],
         "doc_turn_before": decision["doc_turn_before"],
         "doc_turn_after": decision["doc_turn_after"],
+        "cta_from_turn": decision["cta_from_turn"],
     }
     return payload
