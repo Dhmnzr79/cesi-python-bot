@@ -1,407 +1,305 @@
-# Bot 3.0 — Архитектурный вектор для Cursor
+# Bot Architecture — актуальный срез (as-is)
 
-## 1. Текущее состояние
-
-### Что уже работает
-- **Контентный слой** — markdown + YAML frontmatter с aliases, suggest_h3, suggest_refs, empathy-флагами, CTA. Сильная основа: знания и метаданные темы лежат рядом.
-- **Индексация** — `build_index.py` режет по H2/H3, добавляет aliases в embedding-текст, нормализует векторы.
-- **Диалоговый backend** — `app.py` умеет retrieval, LLM-rerank, ref-роутинг, память сессии, эмпатию, `/ask`, `/lead`, debug.
-- **Логи** — `logging_setup.py` пишет JSONL — фундамент будущего дашборда.
-
-### Что дал Flowise
-Не финальная платформа, а этап для выработки спецификации: followup, handoff, видео, сценарий «ситуация», лимиты UI, порядок элементов. Это ценный опыт и источник правил.
+Документ описывает текущую архитектуру бота в репозитории: как система реально работает сейчас, без исторических слоев и устаревших проблем.
 
 ---
 
-## 2. Критичные проблемы
+## 1. Назначение системы
 
-| Проблема | Суть |
-|---|---|
-| `app.py` — god file | Flask, retrieval, память, эмпатия, сборка ответа, лиды — всё в одном. Плюс блок сборки ответа продублирован ×4. |
-| Нет policy-layer | Нет детерминированного слоя для: трактовки «да», показа CTA/видео/ситуации, мостиков между темами, handoff. |
-| Состояние раздвоено | `SESSION_STATE` (эмпатия) и `SESS` (история) — два независимых словаря. Надо объединить. |
-| Broad query → плохой чанк | Общий вопрос может попасть в узкий H3 вместо overview. Нужен механизм предпочтения overview. |
-| Нет low-score защиты | При score < 0.40 бот всё равно отвечает из нерелевантного чанка. |
+Бот отвечает на вопросы пользователей по контентной базе клиники (markdown + frontmatter), поддерживает сценарные переходы (CTA, ситуация, lead-flow), ведет сессию и формирует единый JSON-ответ для фронта.
+
+Основной endpoint: `POST /ask`.
 
 ---
 
-## 3. Сильные места — сохранить как фундамент
+## 2. Модули и ответственность
 
-- **YAML как источник правды** — развить: добавить `topic`, `subtopic`, `video_key`, `next_buttons`, `handoff_policy`, `situation_allowed`.
-- **Ref-роутинг кнопок** — кнопка несёт `label` + `ref`, не просто текст. Убирает класс ошибок retrieval.
-- **Aliases в embedding** — пользователь спрашивает иначе чем написано в базе. Aliases решают этот разрыв.
-- **Детерминированный роутинг до LLM** — contacts/prices через regex уже есть. Расширить на все очевидные случаи.
+### `app.py`
+- Flask-роуты: `/ask`, `/lead`, `/_debug/ping`, `/__debug/retrieval`, `/static/...`.
+- Точка входа запроса, валидация `client_id`, маршрутизация по веткам.
+- Финализация ответа (`finalize_ask`), безопасная сериализация JSON, логирование HTTP.
 
----
+### `query_selector.py`
+- Оркестратор выбора чанка для ответа.
+- Запускает rewrite (если включен), retrieval по исходному и переписанному запросу.
+- Применяет broad-query корректировку, alias-приоритет, low-score защиту, selective rerank.
 
-## 4. Целевая архитектура 3.0
+### `retriever.py`
+- Загрузка корпуса и эмбеддингов, косинусный semantic search.
+- Нормализация retrieval-запроса.
+- Alias scoring (raw/lemma/trigram), определение broad query, предпочтение overview.
+- `llm_rerank` (точечный LLM выбор между top-кандидатами).
 
-```
-┌─────────────────────────────────────────┐
-│  Content layer                          │
-│  markdown + YAML (знания + переходы)    │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│  Retrieval layer                        │
-│  candidates → broad query → prefer      │
-│  overview → grouping → rerank → score   │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│  Dialog state layer (один владелец)     │
-│  history · turn_count · leadIntent      │
-│  last_topic · shown_cta_topics          │
-│  last_bot_action · last_offer_type      │
-│  last_presented_buttons                 │
-│  situation_pending · profile            │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│  Policy layer  ← ГЛАВНЫЙ СЛОЙ           │
-│  детерминированные правила (не LLM)     │
-│  что показывать · когда CTA · handoff   │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│  Generation layer (LLM)                 │
-│  текст · эмпатия · уточнение при        │
-│  реальной двусмысленности после policy  │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│  Response builder                       │
-│  answer · followups · cta · video       │
-│  situation · meta · debug               │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│  Integrations layer                     │
-│  lead → n8n webhook → CRM / Telegram    │
-└─────────────────────────────────────────┘
-```
+### `llm.py`
+- Переписывание query для retrieval с учетом истории диалога.
+- Генерация финального текстового ответа с контекстом чанка.
+- Эмпатия по триггерам и first-in-topic логике.
+- JSON mode для генерации ответа (`{"answer": ...}`).
 
----
+### `chunk_responder.py`
+- Склейка основного контентного пути:
+  1) чанк -> 2) LLM-ответ -> 3) сборка payload -> 4) policy -> 5) side-effects в session.
+- Отметки `video_shown`, `situation_offered`, `cta_shown`, deferred refs и т.д.
 
-## 5. Policy layer — slot-policy
+### `policy.py`
+- Детерминированные правила показа элементов UI:
+  - followups,
+  - quick refs,
+  - video,
+  - situation,
+  - CTA.
+- Интенты `contacts`, `price`, `booking`.
 
-Вместо жёсткой “таблицы if-правил” policy использует **slot-модель**, описанную детально в `work_info/scenario_2.md`:
+### `flow_handlers.py`
+- Сценарные ветки вне контентного retrieval-пути:
+  - lead-flow (имя -> телефон),
+  - situation pending / back,
+  - yes-routing после CTA и situation.
 
-- YAML определяет, какие элементы вообще допустимы в теме:
-  - `suggest_h3` → followup;
-  - `video_key` → видео;
-  - `situation_allowed` → кнопка «Рассказать о ситуации»;
-  - `suggest_refs` → `suggest_ref` (не больше одного per doc).
-- Экран имеет:
-  - 1 слот под CTA;
-  - 2 слота под дополнительные элементы.
-- Дополнительные элементы заполняются по приоритету:
-  - `followup → video → situation → suggest_ref`.
+### `session.py`
+- Единое состояние сессии в SQLite (`data/bot.db` по `SQLITE_PATH`).
+- История диалога, профиль, topic_state, last bot action, сценарные флаги.
 
-Спецрежимы имеют приоритет над slot-policy и временно отключают её:
+### `ux_builder.py`
+- Единая сборка структуры ответа `/ask`.
+- Формирование followups/quick refs/cta из metadata.
+- UI-лимиты (не больше 2 followups и 1 quick ref).
 
-- `lead_flow` — показываются только шаги воронки (имя, телефон, финальный шаг);
-- `situation_pending` — показывается только экран ввода ситуации и кнопка «Назад к диалогу».
+### `meta_loader.py`
+- Читает YAML frontmatter из `md/*.md`.
+- Отдает doc metadata (`doc_type`, `suggest_h3`, `suggest_refs`, `video_key`, `situation_allowed`, `cta_*`, empathy flags).
 
-Policy не спорит с YAML, а только:
+### `build_index.py`
+- Индексация markdown-контента в `data/corpus.jsonl` + `data/embeddings.npy`.
+- Чанкование по H2/H3.
+- Добавление aliases в embedding-текст.
 
-- исключает активные спецрежимы;
-- убирает уже показанное (`video_shown`, `situation_offered`, покрытые followup и использованный `suggest_ref`);
-- раскладывает допустимые элементы по двум слотам в порядке приоритета.
+### `lead_service.py`
+- Прием и базовая валидация лида.
+- Сохранение лида локально в `leads/*.json`.
+
+### `logging_setup.py`
+- JSONL-логирование в `logs/app.jsonl`.
+- Санитизация чувствительных полей.
 
 ---
 
-## 6. Обработка «да»
+## 3. Контентный слой (markdown + YAML)
 
-«Да» не имеет смысла само по себе — смысл берётся из последнего шага бота.
+Источник знаний — `md/*.md`:
+- текст секций в H2/H3;
+- идентификаторы якорей (`{#...}`) для точного ref-routing;
+- frontmatter-поля для навигации и сценариев.
 
-| Последний шаг бота | Трактовка «да» |
-|---|---|
-| Воронка записи | Продолжить воронку |
-| Предложена подтема | Развернуть подтему |
-| Предложен CTA | Запустить lead flow |
-| Предложена «ситуация» | Включить situation_pending |
-| Несколько равновероятных | Один уточняющий вопрос |
-| Нет опоры | Дефолт: короткий ответ + одна кнопка |
+Ключевые поля frontmatter:
+- `doc_id`, `topic`, `subtopic`, `doc_type`;
+- `aliases`;
+- `suggest_h3`, `suggest_refs`;
+- `cta_text`, `cta_action`;
+- `situation_allowed`;
+- `video_key`;
+- `empathy_enabled`, `empathy_tag`.
 
-Это не магия промпта — это явная логика в policy layer.
-
----
-
-## 7. Кнопки и переходы
-
-Кнопка всегда несёт два поля:
-```json
-{ "label": "Что входит в стоимость", "ref": "implants-pricing.md#cost-breakdown" }
-```
-Текст кнопки и маршрут — не одно и то же.
-
-**Лимит на экране:** 1–2 followup + максимум один «тяжёлый» элемент (видео **или** ситуация **или** CTA). Не всё сразу.
+Дополнительно поддерживаются локальные алиасы внутри блока через HTML-комментарии `<!-- aliases: [...] -->`.
 
 ---
 
-## 8. Видео и сценарий «ситуация»
+## 4. Пайплайн обработки вопроса (`/ask`)
 
-**Видео:**
-- `video_key` в YAML темы → отдельный каталог `video_map.json` (title + url)
-- Policy решает показывать или нет
-- Не показывать если 2+ followup или идёт воронка
-
-**Ситуация:**
-- Отдельный сценарий, не просто кнопка
-- `situation_pending` отключает retrieval на этот ход
-- Note сохраняется и уходит в лид/CRM
-- Повторно в той же теме не предлагать
+1. Принять JSON, валидировать `client_id`, получить `sid`.
+2. Обработать быстрые сценарные ветки (reset, lead/situation/back/yes).
+3. Если пришел `ref` -> взять чанк по ref и ответить по нему.
+4. Если обычный `q`:
+   - выбрать чанк через `query_selector.select_chunk_for_question()`;
+   - при `low_score` вернуть безопасный fallback;
+   - при успешном выборе вызвать `respond_from_chunk()`.
+5. `respond_from_chunk()`:
+   - получить meta документа;
+   - сгенерировать ответ LLM;
+   - собрать payload (`ux_builder`);
+   - применить policy;
+   - записать session side-effects;
+   - вернуть унифицированный JSON.
 
 ---
 
-## 9. API-контракт `/ask`
+## 5. Механика точности (retrieval quality)
 
-**Запрос:**
-```json
-{
-  "q": "больно ли ставить имплант",
-  "ref": "faq-pain.md#overview",
-  "sid": "uuid",
-  "client_id": "clinic_cesi"
-}
-```
+### 5.1 Query rewrite
+- Используется для retrieval, но не подменяет пользовательский вопрос в UI.
+- Учитывает хвост истории (`hist`).
+- Валидации rewrite:
+  - reject маркеры утечки промпта,
+  - overlap check с исходным вопросом,
+  - fallback к исходному вопросу при невалидном rewrite.
 
-**Ответ:**
+### 5.2 Двойной retrieval и merge
+- Поиск по `q_user` и по `q_rewrite_effective`.
+- Объединение кандидатов с дедупликацией и сохранением лучшего score.
+
+### 5.3 Broad query -> overview preference
+- Короткие общие вопросы без “узких” терминов считаются broad.
+- При совпадении top-файла приоритет смещается к overview-секции.
+
+### 5.4 Alias layer: словоформы и опечатки
+- Alias score для чанка = `max(raw, lemma, trigram)`.
+- `lemma` канал использует `pymorphy3` (если установлен).
+- `trigram` канал поднимает recall на опечатках и близких формах.
+- Strong alias может выбирать чанк напрямую, soft alias может спасти low-score кейс.
+
+### 5.5 Selective rerank
+- Rerank вызывается только в узкой зоне неоднозначности (по score и gap).
+- Если условия не выполнены, бот не тратит вызов rerank и берет semantic top.
+
+### 5.6 Low-score guard
+- При слишком низком top similarity бот не отвечает “из ничего”.
+- Возвращается безопасный fallback с просьбой уточнить вопрос и CTA.
+
+---
+
+## 6. Сценарии и state-machine
+
+### 6.1 Lead-flow
+- Входы:
+  - явный booking intent,
+  - CTA action = `lead`,
+  - “да” после предложенного CTA.
+- Шаги:
+  - `collecting_name`,
+  - `collecting_phone`,
+  - `submitted`.
+
+### 6.2 Situation-flow
+- Показ кнопки ситуации управляется policy + `situation_allowed`.
+- `situation_pending` переключает экран в режим ввода ситуации.
+- После получения ситуации:
+  - note сохраняется,
+  - бот переводит пользователя в lead-flow (шаг имени).
+- Поддержан `situation_action=back` с восстановлением последнего контентного экрана.
+
+### 6.3 Короткие ответы ("да")
+- Трактовка опирается на `last_bot_action` из session:
+  - `offered_cta` + yes -> lead-flow,
+  - `offered_situation` + yes -> situation pending.
+
+---
+
+## 7. Память и состояние сессии
+
+Хранение: SQLite (`sessions`), ключ — `sid`.
+
+Основные поля:
+- `hist`, `profile`, `session_turn_count`;
+- `current_doc_id`, `topic_state`;
+- `last_bot_action`, `last_offer_type`, `last_presented_buttons`;
+- `situation_pending`, `situation_note`;
+- `lead_intent`;
+- `last_content_ui_payload` (для restore после back).
+
+Topic-state по `doc_id`:
+- `doc_turn_count`,
+- `covered_h3_ids`,
+- `video_shown` / `video_pending`,
+- `situation_offered`,
+- `suggest_ref_used`,
+- `refs_deferred`,
+- `cta_shown`.
+
+---
+
+## 8. Policy и UI-слоты (текущее поведение)
+
+Policy принимает готовый payload и решает итоговую видимость:
+- какие `followups` оставить;
+- показывать ли `video`;
+- показывать ли `situation`;
+- показывать ли `quick_replies` (refs);
+- показывать ли `cta`.
+
+Базовые принципы:
+- спецрежимы (lead/situation pending) имеют приоритет;
+- не показывать уже исчерпанные элементы;
+- учитывать `doc_turn_count` и состояние темы;
+- не показывать CTA слишком рано (до нужного шага темы) и при активных конфликтующих режимах.
+
+UI-нормализация дополнительно ограничивает:
+- followups: максимум 2,
+- quick refs: максимум 1.
+
+---
+
+## 9. API-контракт ответа `/ask` (текущий)
+
+Базовая форма:
+
 ```json
 {
   "answer": "...",
-  "followups": [
-    { "label": "Какую анестезию используют", "ref": "faq-pain.md#anesthesia" }
-  ],
-  "cta": { "text": "Записаться на консультацию", "action": "booking" },
-  "video": { "title": "...", "url": "..." },
-  "situation": { "show": true },
+  "quick_replies": [{ "label": "...", "ref": "file.md#anchor" }],
+  "cta": { "text": "...", "action": "lead" },
+  "video": { "key": "..." },
+  "situation": { "show": true, "mode": "normal|pending" },
+  "offer": null,
   "meta": {
-    "file": "faq-pain.md",
-    "h2_id": "overview",
-    "score": 0.87,
-    "turn_count": 2,
-    "client_id": "clinic_cesi",
-    "sid": "uuid"
+    "file": "...",
+    "h2_id": "...",
+    "h3_id": "...",
+    "score": 0.0,
+    "followups": [{ "label": "...", "ref": "..." }],
+    "sid": "...",
+    "client_id": "...",
+    "policy_decision": { "...": "..." }
   }
 }
 ```
 
----
-
-## 10. Файловая структура после рефакторинга
-
-```
-bot/
-├── app.py              # только Flask-роуты (/ask, /lead, /debug)
-├── retriever.py        # embed, retrieve, rerank, broad_query_detect
-├── llm.py              # промпты, эмпатия, вызов OpenAI
-├── session.py          # единый session state (объединить SESS + SESSION_STATE)
-├── policy.py           # 10 правил, логика кнопок, CTA, видео, ситуация
-├── ux_builder.py       # build_response() — одна функция вместо ×4
-├── lead_service.py     # валидация лида, сохранение, webhook → n8n, CRM-маршрутизация
-├── config.py           # client_id, пути, модели, константы
-├── meta_loader.py      # без изменений
-├── logging_setup.py    # без изменений
-├── build_index.py      # без изменений
-│
-├── md/
-│   ├── clinic_cesi/
-│   └── clinic_stoma_msk/
-│
-├── data/
-│   ├── clinic_cesi/
-│   │   ├── embeddings.npy
-│   │   └── corpus.jsonl
-│   └── clinic_stoma_msk/
-│
-└── clients/
-    └── clients.json    # конфиг клиентов: name, cta_phone, tg_notify
-```
+Для фронта критичны:
+- `answer`,
+- `quick_replies`,
+- `cta`,
+- `situation.show` + `situation.mode`,
+- `meta.followups`.
 
 ---
 
-## 11. Порядок работы в Cursor
+## 10. Видео: статус
 
-### Этап 1 — Рефакторинг (не добавлять новые фичи)
-1. Разнести `app.py` по модулям согласно структуре выше
-2. Объединить `SESSION_STATE` и `SESS` в один `session.py`
-3. Схлопнуть четыре одинаковых блока сборки ответа в `build_response()`
-4. Добавить `client_id` во все слои
-
-### Этап 2 — Ядро
-5. Вынести policy layer в `policy.py` с таблицей правил
-6. Добавить `last_bot_action`, `last_offer_type`, `last_presented_buttons` в `session.py`
-7. Добавить broad query detector и low-score fallback в `retriever.py`
-8. Перейти на SQLite вместо `SESS = {}` и JSONL-файла
-9. Добавить structured outputs (JSON mode) в вызов OpenAI
-
-### Этап 3 — Фичи
-10. Нормализовать YAML-структуру под новые поля (video_key, next_buttons, situation_allowed)
-11. Подключить видео и ситуацию как часть core
-12. Простая страница `/admin` — дашборд из SQLite
-13. Мультитенантность: изолированные индексы и сессии по `client_id`
+- На backend видео контролируется через `video_key` + policy.
+- На текущем этапе видео канал считать тестовым/вспомогательным (UI-заглушка допустима).
+- Основной фокус качества — retrieval точность и сценарные переходы.
 
 ---
 
-## 12. Что не строить
+## 11. Мультиклиентность: текущее и перспектива
 
-- Multi-agent архитектура — избыточно для одного бота
-- Векторная БД (Qdrant) — не нужна до 50k+ чанков
-- BM25 / hybrid search — база написана простым языком, aliases закрывают задачу
-- Fine-tuning — RAG меняет знания, fine-tuning меняет поведение; нужны знания
-- LangChain / LangGraph — добавят абстракции поверх того что написано чище вручную
+### Сейчас
+- `client_id` валидируется на входе.
+- В retrieval есть фильтрация кандидатов по `client_id`.
+- Система функциональна для текущего single-client/ограниченного режима.
 
----
-
-## 13. Source of truth — кто за что отвечает
-
-Явная фиксация предотвращает дрейф в Cursor когда логику начинают класть куда попало.
-
-| Что | Где живёт |
-|---|---|
-| Знания и маршруты переходов | YAML + markdown (`md/`) |
-| Диалоговые решения (что показать, когда CTA) | `policy.py` |
-| Текст ответа пользователю | `llm.py` (generation layer) |
-| Состояние сессии | `session.py` |
-| Конфиг клиента | `clients/clients.json` |
-| Интеграции после лида | `lead_service.py` → n8n |
-
-**Запрещённые паттерны:**
-- "давай часть решим промптом" — если это бизнес-правило, оно идёт в `policy.py`
-- "давай положим в meta и фронт разберётся" — фронт не принимает решений
-- "давай захардкодим в app.py" — app.py только роуты
+### Перспектива
+- Полная tenant-изоляция:
+  - контент: `md/{client_id}/...`,
+  - индексы: `data/{client_id}/...`,
+  - отдельные эксплуатационные контуры и аналитика.
+- Это roadmap-задача масштабирования, не блокер текущей точности одного клиента.
 
 ---
 
-## 14. last_bot_action — обязательное поле состояния
+## 12. Операционный контур
 
-Без этого поля policy не может корректно трактовать короткие ответы («да», «угу», «давайте», «хочу»).
-
-**Что хранить в session state:**
-```python
-session = {
-    # ... остальные поля ...
-    "last_bot_action": "offered_subtopic",   # что предложил бот последним
-    "last_offer_type": "followup",           # тип предложения
-    "last_presented_buttons": [              # какие кнопки были на экране
-        { "label": "Этапы имплантации", "ref": "faq-stages.md#overview" }
-    ]
-}
-```
-
-**Допустимые значения `last_bot_action`:**
-```
-offered_subtopic      → развернуть предложенную подтему
-offered_cta           → запустить lead flow
-offered_situation     → включить situation_pending
-in_lead_flow          → продолжить воронку
-offered_handoff       → подтвердить передачу
-none                  → дефолт: короткий ответ + одна кнопка
-```
-
-**Правило:** policy читает `last_bot_action` первым делом при любом коротком ответе. LLM подключается только если после этого всё ещё есть двусмысленность.
+- Логи: JSONL (`logs/app.jsonl`), структурированные события.
+- Отладка retrieval: `/__debug/retrieval`.
+- Тестер: `static/tester.html` (ручная проверка сценариев и payload).
 
 ---
 
-## 15. Broad query → prefer overview
+## 13. Итог
 
-Одна из центральных проблем по тестам: общий вопрос попадает в узкий H3 вместо overview.
+Текущая архитектура — рабочий RAG + сценарный backend с детерминированной обработкой ключевых переходов и многоступенчатой защитой точности (rewrite, aliases, broad-query preference, selective rerank, low-score guard).
 
-**Принцип:**
-- Если вопрос общий (короткий, без конкретики) и документ содержит overview + H3 → предпочитать overview
-- H3 использовать как followup-углубление, не как главный ответ на общий вопрос
-- Если топ-3 кандидата из одного файла → брать overview этого файла
+На текущем этапе для продукта приоритет:
+1. стабильная точность попадания в релевантные чанки;
+2. предсказуемое поведение сценариев (CTA / ситуация / lead-flow);
+3. чистая интеграция фронта с текущим контрактом `/ask`.
 
-**Реализация в `retriever.py`:**
-```python
-def broad_query_detect(q: str) -> bool:
-    # короткий вопрос без конкретных терминов = broad
-    return len(q.split()) <= 5 and not any(
-        term in q.lower() for term in ["цена", "стоимость", "адрес", "телефон"]
-    )
-
-def prefer_overview(candidates: list) -> dict:
-    # если broad query и есть overview в топ-3 — взять его
-    for c in candidates[:3]:
-        if _is_overview_by_ids(c.get("h2_id"), c.get("h3_id")):
-            return c
-    return candidates[0]
-```
-
-**Low-score защита:**
-```python
-LOW_SCORE_THRESHOLD = 0.40
-
-if top_score < LOW_SCORE_THRESHOLD:
-    return fallback_response(
-        answer="Не нашёл точного ответа на этот вопрос. Уточните или выберите тему.",
-        cta=default_cta(client_id)
-    )
-```
-
----
-
-## 16. Безопасность сервера
-
-### Обязательный минимум
-
-**nginx:**
-```nginx
-# Rate limiting — не более 10 запросов в минуту с одного IP
-limit_req_zone $binary_remote_addr zone=ask:10m rate=10r/m;
-
-location /ask {
-    limit_req zone=ask burst=5 nodelay;
-    proxy_pass http://127.0.0.1:8000;
-}
-
-# CORS — только доверенные домены клиентов
-add_header Access-Control-Allow-Origin "https://клиент.ru" always;
-```
-
-**Firewall (ufw):**
-```bash
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 22/tcp   # или нестандартный порт SSH
-ufw deny все остальное
-```
-
-**Приложение:**
-- Все секреты только в `.env`, никогда в коде
-- Gunicorn в проде, не Flask dev server: `gunicorn -w 2 -b 127.0.0.1:8000 app:app`
-- `/admin` и `/debug` — под basic auth или отдельным токеном
-- Логи не должны содержать OpenAI API key, телефоны, персональные данные
-
-### Валидация client_id
-
-`client_id` приходит от фронта — доверять нельзя без проверки.
-
-```python
-# config.py
-ALLOWED_CLIENTS = set(clients_json.keys())  # {"clinic_cesi", "clinic_stoma_msk"}
-
-# app.py — в начале каждого /ask
-client_id = data.get("client_id", "").strip()
-if client_id not in ALLOWED_CLIENTS:
-    return jsonify({"error": "unknown_client"}), 403
-```
-
-Без этой проверки любой может запросить данные чужого клиента или сломать индекс.
-
-### Бэкапы
-
-Три вещи которые нужно бэкапить ежедневно:
-
-```bash
-# cron: 0 3 * * * /srv/backup.sh
-rsync -av /srv/bot/md/        backup:/bot-backup/md/
-rsync -av /srv/bot/data/      backup:/bot-backup/data/
-rsync -av /srv/bot/bot.db     backup:/bot-backup/db/
-```
-
-- `md/` — контент клиентов (долго восстанавливать вручную)
-- `data/` — эмбеддинги (пересчитываются, но это время и деньги на API)
-- `bot.db` — SQLite с сессиями и логами (история диалогов, аналитика)

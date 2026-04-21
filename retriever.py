@@ -730,7 +730,28 @@ def embed_q(q: str) -> np.ndarray:
     return v
 
 
-def retrieve(q: str, topk: int = 4, *, client_id: str | None = None) -> list:
+def merge_retrieval_candidates(*lists: list) -> list:
+    """Объединить несколько списков кандидатов из retrieve, для каждого чанка оставить больший _score."""
+    best: dict[tuple, dict] = {}
+    for lst in lists:
+        if not lst:
+            continue
+        for c in lst:
+            key = (
+                c.get("file"),
+                c.get("h2_id") or c.get("h2"),
+                c.get("h3_id") or c.get("h3"),
+            )
+            sc = float(c.get("_score") or 0.0)
+            prev = best.get(key)
+            if prev is None or sc > float(prev.get("_score") or 0.0):
+                best[key] = dict(c)
+    return sorted(best.values(), key=lambda x: float(x.get("_score") or 0.0), reverse=True)
+
+
+def retrieve(
+    q: str, topk: int = 4, *, client_id: str | None = None, silent: bool = False
+) -> list:
     emb = _get_embeddings()
     q_in = (q or "").strip()
     q_norm = normalize_retrieval_query(q_in)
@@ -776,17 +797,18 @@ def retrieve(q: str, topk: int = 4, *, client_id: str | None = None) -> list:
     except Exception:
         chunks_used = []
 
-    log_json(
-        logger,
-        "retrieval_result",
-        used_query=q_embed[:500],
-        query_raw=q_in[:500],
-        query_normalized=(q_norm[:500] if q_norm else None),
-        k=topk,
-        dedup_keys=["file", "h2_id", "h3_id"],
-        chunks_used=chunks_used,
-        top_score=(chunks_used[0]["score"] if chunks_used else None),
-    )
+    if not silent:
+        log_json(
+            logger,
+            "retrieval_result",
+            used_query=q_embed[:500],
+            query_raw=q_in[:500],
+            query_normalized=(q_norm[:500] if q_norm else None),
+            k=topk,
+            dedup_keys=["file", "h2_id", "h3_id"],
+            chunks_used=chunks_used,
+            top_score=(chunks_used[0]["score"] if chunks_used else None),
+        )
 
     return out
 

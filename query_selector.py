@@ -18,6 +18,7 @@ from retriever import (
     corpus_alias_leader,
     is_point_literal_query,
     llm_rerank,
+    merge_retrieval_candidates,
     normalize_retrieval_query,
     prefer_overview_if_broad,
     retrieve,
@@ -36,31 +37,44 @@ def select_chunk_for_question(
     """
     q_user = (q or "").strip()
     if sid and QUERY_REWRITE_ON:
-        q_raw = rewrite_query_for_retrieval(sid, q_user, client_id=client_id)
+        q_rewrite_eff = rewrite_query_for_retrieval(sid, q_user, client_id=client_id)
     else:
-        q_raw = q_user
-    q_use = normalize_retrieval_query(q_raw) or q_raw
+        q_rewrite_eff = q_user
+
+    # Интенты и алиасы — только по исходному вопросу пациента (не по rewrite).
+    q_policy = normalize_retrieval_query(q_user) or q_user
+    nu = (normalize_retrieval_query(q_user) or q_user).strip().lower()
+    nr = (normalize_retrieval_query(q_rewrite_eff) or q_rewrite_eff).strip().lower()
+
+    nr_meta = normalize_retrieval_query(q_rewrite_eff) or q_rewrite_eff
     base_meta = {
         "query_user_raw": q_user[:200],
-        "query_raw": q_raw[:200],
-        "query_normalized": q_use[:200],
-        "rewrite_applied": bool(q_raw != q_user),
+        "query_rewrite_effective": q_rewrite_eff[:200],
+        "query_normalized_user": q_policy[:200],
+        "query_normalized_rewrite": nr_meta[:200],
+        "rewrite_applied": bool(q_rewrite_eff.strip().lower() != q_user.strip().lower()),
     }
 
     def _dm(extra: dict) -> dict:
         return {**base_meta, **extra}
 
-    cands = retrieve(q_raw, topk=8, client_id=client_id)
-    cands = prefer_overview_if_broad(cands, broad_query_detect(q_use))
+    primary = retrieve(q_user, topk=8, client_id=client_id)
+    secondary: list = []
+    if nr != nu:
+        secondary = retrieve(
+            q_rewrite_eff, topk=8, client_id=client_id, silent=True
+        )
+    cands = merge_retrieval_candidates(primary, secondary)[:8]
+    cands = prefer_overview_if_broad(cands, broad_query_detect(q_policy))
     if not cands:
         return {
             "mode": "no_candidates",
             "debug_meta": _dm({"top_score": None}),
         }
 
-    is_contacts = contacts_intent(q_use)
-    is_price = price_intent(q_use)
-    alias_leader, alias_score = corpus_alias_leader(q_use, client_id=client_id)
+    is_contacts = contacts_intent(q_policy)
+    is_price = price_intent(q_policy)
+    alias_leader, alias_score = corpus_alias_leader(q_policy, client_id=client_id)
     alias_strong = bool(alias_leader and alias_score >= ALIAS_STRONG_THRESHOLD)
 
     top_score = float(cands[0].get("_score") or 0.0)
@@ -159,7 +173,7 @@ def select_chunk_for_question(
         RERANK_TOP_MIN <= top_score <= RERANK_TOP_MAX
         and len(cands) >= 2
         and score_gap <= RERANK_GAP_MAX
-        and not is_point_literal_query(q_use)
+        and not is_point_literal_query(q_policy)
         and not alias_strong
     )
     near_low_rerank = (
@@ -167,12 +181,12 @@ def select_chunk_for_question(
         and RERANK_TOP_MIN <= top_score <= RERANK_NEAR_LOW_TOP_MAX
         and top_score < LOW_SCORE_THRESHOLD + 0.02
         and score_gap <= RERANK_NEAR_LOW_GAP_MAX
-        and not is_point_literal_query(q_use)
+        and not is_point_literal_query(q_policy)
         and not alias_strong
     )
     use_rerank = narrow_rerank or near_low_rerank
     if use_rerank:
-        top = llm_rerank(q_raw, cands[:3])
+        top = llm_rerank(q_user, cands[:3])
 
     return {
         "mode": "chunk",

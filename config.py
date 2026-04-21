@@ -13,6 +13,19 @@ CHAT_MODEL = os.getenv("MODEL_CHAT", "gpt-4o-mini")
 QUERY_REWRITE_MODEL = (os.getenv("MODEL_QUERY_REWRITE") or "").strip() or CHAT_MODEL
 QUERY_REWRITE_ON = os.getenv("QUERY_REWRITE_ON", "1").lower() in ("1", "true", "yes")
 QUERY_REWRITE_MAX_MESSAGES = int(os.getenv("QUERY_REWRITE_MAX_MESSAGES", "10"))
+# Подстроки в ответе rewrite → отбросить (утечка инструкции / мусор). Разделитель |
+_rewrite_reject_raw = os.getenv(
+    "REWRITE_REJECT_SUBSTRINGS",
+    "врач, процедура, симптом, зуб, материал|ключевые сущности",
+)
+REWRITE_REJECT_SUBSTRINGS: tuple[str, ...] = tuple(
+    x.strip().lower() for x in _rewrite_reject_raw.split("|") if x.strip()
+)
+QUERY_REWRITE_VALIDATE_OVERLAP = os.getenv("QUERY_REWRITE_VALIDATE_OVERLAP", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # --- HTTP / app ---
 PORT = int(os.getenv("PORT", "9000"))

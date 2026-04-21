@@ -1,5 +1,6 @@
 """Промпты и вызовы OpenAI (чат); эмпатия."""
 import json
+import re
 
 from openai import OpenAI
 
@@ -12,6 +13,8 @@ from config import (
     QUERY_REWRITE_MAX_MESSAGES,
     QUERY_REWRITE_MODEL,
     QUERY_REWRITE_ON,
+    QUERY_REWRITE_VALIDATE_OVERLAP,
+    REWRITE_REJECT_SUBSTRINGS,
     TRIGGERS_COMPILED,
 )
 from logging_setup import get_logger, log_json
@@ -35,6 +38,53 @@ _REWRITE_SYSTEM = (
     "Если вопрос уже самодостаточен — сожми до сути без лишних слов. "
     'Ответь одним JSON-объектом с ключом "search_query" (строка). Без markdown.'
 )
+
+
+def _norm_rewrite_compare(s: str) -> str:
+    x = (s or "").strip().lower().replace("ё", "е")
+    x = re.sub(r"[^\w\s\-]", " ", x, flags=re.U)
+    return re.sub(r"\s+", " ", x).strip()
+
+
+def validated_retrieval_rewrite(q_user: str, model_out: str) -> tuple[str, str | None]:
+    """Вернуть (эффективная строка для доп. семантики, причина отказа или None).
+
+    Эффективная строка никогда не бывает пустой при непустом q_user."""
+    u0 = (q_user or "").strip()
+    w0 = (model_out or "").strip()
+    if not u0:
+        return w0, None
+    if not w0 or w0.lower() == u0.lower():
+        return u0 if not w0 else w0, None
+
+    wl = w0.lower()
+    for marker in REWRITE_REJECT_SUBSTRINGS:
+        if marker and marker in wl:
+            return u0, "prompt_leak"
+
+    if QUERY_REWRITE_VALIDATE_OVERLAP and not _rewrite_overlaps_user_question(u0, w0):
+        return u0, "no_overlap"
+
+    return w0, None
+
+
+def _rewrite_overlaps_user_question(q_user: str, q_rewrite: str) -> bool:
+    """Есть ли общая содержательная связь между исходным вопросом и переписанным запросом."""
+    u = _norm_rewrite_compare(q_user)
+    r = _norm_rewrite_compare(q_rewrite)
+    if not u or not r:
+        return True
+    for tok in u.split():
+        if len(tok) >= 4 and tok[:4] in r:
+            return True
+        if 3 <= len(tok) < 4 and tok in r.split():
+            return True
+    for tok in r.split():
+        if len(tok) >= 4 and tok[:4] in u:
+            return True
+        if 3 <= len(tok) < 4 and tok in u.split():
+            return True
+    return False
 
 
 def rewrite_query_for_retrieval(
@@ -78,16 +128,30 @@ def rewrite_query_for_retrieval(
         out = str(sq).strip() if sq is not None else ""
         if not out or len(out) > 600:
             raise ValueError("rewrite_empty_or_long")
+        effective, reject_reason = validated_retrieval_rewrite(q0, out)
+        if reject_reason:
+            log_json(
+                logger,
+                "retrieval_query_rewrite_rejected",
+                client_id=client_id,
+                sid=session_id,
+                query_raw=q0[:200],
+                model_out=out[:200],
+                reason=reject_reason,
+                effective=effective[:200],
+            )
+        rewrite_applied = effective.lower() != q0.lower()
         log_json(
             logger,
             "retrieval_query_rewrite",
             client_id=client_id,
             sid=session_id,
             query_raw=q0[:200],
-            query_for_retrieval=out[:200],
-            rewrite_applied=out.lower() != q0.lower(),
+            query_for_retrieval=effective[:200],
+            rewrite_applied=rewrite_applied,
+            model_raw_before_validate=out[:200] if reject_reason else None,
         )
-        return out
+        return effective
     except Exception as e:
         log_json(
             logger,
