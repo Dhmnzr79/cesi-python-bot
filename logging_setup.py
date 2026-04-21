@@ -7,13 +7,34 @@ LOG_DIR = os.getenv("BOT_LOG_DIR", "logs")
 LOG_FILE = os.path.join(LOG_DIR, os.getenv("BOT_LOG_FILE", "app.jsonl"))
 
 SENSITIVE_KEYS = ("api_key","apikey","token","secret","authorization","password")
+_PHONE_DIGIT_MIN = 10
+
+
+def _mask_phone_like(value):
+    s = str(value or "")
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) < _PHONE_DIGIT_MIN:
+        return value
+    if len(digits) >= 11:
+        return f"+{digits[0]}******{digits[-2:]}"
+    return "***"
 
 def _sanitize(d):
     if not isinstance(d, dict): return d
     clean = {}
     for k, v in d.items():
-        if isinstance(k, str) and any(s in k.lower() for s in SENSITIVE_KEYS):
+        kl = k.lower() if isinstance(k, str) else ""
+        if isinstance(k, str) and any(s in kl for s in SENSITIVE_KEYS):
             clean[k] = "***"
+        elif isinstance(k, str) and ("phone" in kl or "tel" in kl):
+            clean[k] = _mask_phone_like(v)
+        elif isinstance(k, str) and "situation" in kl:
+            txt = str(v or "")
+            clean[k] = (txt[:80] + "…") if len(txt) > 80 else txt
+        elif isinstance(v, dict):
+            clean[k] = _sanitize(v)
+        elif isinstance(v, list):
+            clean[k] = [_sanitize(x) if isinstance(x, dict) else x for x in v]
         else:
             clean[k] = v
     return clean

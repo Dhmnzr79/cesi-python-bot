@@ -498,7 +498,11 @@ def extract_phone(text: str) -> str | None:
     m = PHONE_RX.search(text or "")
     if not m:
         return None
-    raw = re.sub(r"\D", "", m.group(0))
+    return normalize_phone(m.group(0))
+
+
+def normalize_phone(text: str) -> str | None:
+    raw = re.sub(r"\D", "", text or "")
     if len(raw) == 11 and raw.startswith("8"):
         raw = "7" + raw[1:]
     if len(raw) == 10:

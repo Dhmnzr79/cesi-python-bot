@@ -1,5 +1,6 @@
 """Промпты и вызовы OpenAI (чат); эмпатия."""
 import json
+import os
 import re
 
 from openai import OpenAI
@@ -27,6 +28,11 @@ from session import (
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger = get_logger("bot")
+LLM_REQUEST_TIMEOUT_SEC = float(os.getenv("LLM_REQUEST_TIMEOUT_SEC", "20"))
+LLM_FALLBACK_ANSWER = os.getenv(
+    "LLM_FALLBACK_ANSWER",
+    "Извините, сейчас есть техническая задержка. Могу повторить ответ или предложить консультацию.",
+)
 
 _REWRITE_SYSTEM = (
     "Ты формулируешь поисковый запрос для семантического поиска по базе знаний стоматологии. "
@@ -111,6 +117,7 @@ def rewrite_query_for_retrieval(
             temperature=0.15,
             max_tokens=200,
             response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
             messages=[
                 {"role": "system", "content": _REWRITE_SYSTEM},
                 {"role": "user", "content": user_block},
@@ -266,16 +273,28 @@ def generate_answer_with_empathy(
     kwargs = dict(model=CHAT_MODEL, temperature=0.3, messages=messages)
     if CHAT_JSON_MODE:
         kwargs["response_format"] = {"type": "json_object"}
-    resp = client.chat.completions.create(**kwargs)
-    raw = (resp.choices[0].message.content or "").strip()
-    answer = raw
-    if CHAT_JSON_MODE:
-        try:
-            obj = json.loads(raw)
-            if isinstance(obj, dict) and obj.get("answer"):
-                answer = str(obj["answer"]).strip()
-        except (json.JSONDecodeError, TypeError):
-            pass
+    kwargs["timeout"] = LLM_REQUEST_TIMEOUT_SEC
+    try:
+        resp = client.chat.completions.create(**kwargs)
+        raw = (resp.choices[0].message.content or "").strip()
+        answer = raw
+        if CHAT_JSON_MODE:
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict) and obj.get("answer"):
+                    answer = str(obj["answer"]).strip()
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not (answer or "").strip():
+            answer = LLM_FALLBACK_ANSWER
+    except Exception as e:
+        log_json(
+            logger,
+            "llm_generate_failed",
+            sid=session_id,
+            err=str(e)[:300],
+        )
+        answer = LLM_FALLBACK_ANSWER
 
     update_topic_empathy(session_id, doc_key, use_empathy)
 

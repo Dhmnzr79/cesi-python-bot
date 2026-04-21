@@ -41,6 +41,7 @@ from ux_builder import (
 
 app = Flask(__name__, static_folder="static")
 logger = get_logger("bot")
+APP_ENV = (os.getenv("APP_ENV") or "local").strip().lower()
 _POLICY_SUPPORTS_PRE_DOC_TURN = "pre_doc_turn_count" in inspect.signature(
     apply_response_policy
 ).parameters
@@ -239,7 +240,9 @@ def _after(resp):
 
 @app.get("/_debug/ping")
 def debug_ping():
-    if request.headers.get("X-Debug-Token") and request.headers.get("X-Debug-Token") != DEBUG_TOKEN:
+    if APP_ENV == "prod":
+        return jsonify({"error": "not_found"}), 404
+    if request.headers.get("X-Debug-Token") != DEBUG_TOKEN:
         return jsonify({"error": "unauthorized"}), 401
     return jsonify({"ok": True})
 
@@ -375,6 +378,10 @@ def ask():
 
 @app.get("/__debug/retrieval")
 def dbg():
+    if APP_ENV == "prod":
+        return jsonify({"error": "not_found"}), 404
+    if request.headers.get("X-Debug-Token") != DEBUG_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
     q = request.args.get("q", "")
     client_id = resolve_client_id(request.args.get("client_id"))
     if client_id is None:
@@ -419,7 +426,11 @@ def create_lead():
     try:
         data = request.get_json(force=True) or {}
     except Exception:
-        return jsonify({"ok": False, "error": "bad_json"}), 400
+        return jsonify({"ok": False, "error_code": "bad_json", "delivery": None}), 400
+    client_id = resolve_client_id(data.get("client_id"))
+    if client_id is None:
+        return jsonify({"ok": False, "error_code": "unknown_client", "delivery": None}), 403
+    data["client_id"] = client_id
     payload, status = handle_lead(data)
     return jsonify(payload), status
 

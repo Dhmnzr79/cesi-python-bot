@@ -73,7 +73,7 @@ def _lead_flow_payload(
                 sid,
                 client_id,
                 lead_flow=True,
-                lead_error=lead_payload.get("error"),
+                lead_error=lead_payload.get("error_code") or lead_payload.get("error"),
             )
         set_lead_intent(sid, "submitted")
         set_situation_pending(sid, False)
