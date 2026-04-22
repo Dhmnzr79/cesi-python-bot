@@ -1,0 +1,30 @@
+{
+  "ct_scan": {
+    "name": "КТ (компьютерная томография)",
+    "price_type": "fixed",
+    "value": 3000,
+    "currency": "RUB",
+    "note": null
+  },
+  "professional_whitening": {
+    "name": "Профессиональное отбеливание",
+    "price_type": "from",
+    "value": 18000,
+    "currency": "RUB",
+    "note": "точная стоимость зависит от выбранного протокола"
+  },
+  "teeth_treatment": {
+    "name": "Лечение зубов",
+    "price_type": "from",
+    "value": 8500,
+    "currency": "RUB",
+    "note": null
+  },
+  "zirconia_crowns": {
+    "name": "Коронки из диоксида циркония",
+    "price_type": "from",
+    "value": 25000,
+    "currency": "RUB",
+    "note": "стоимость зависит от сложности работы и типа конструкции (одиночная коронка или мост)"
+  }
+}

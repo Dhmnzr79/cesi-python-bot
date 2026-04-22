@@ -143,6 +143,7 @@ def rewrite_query_for_retrieval(
                 "retrieval_query_rewrite_rejected",
                 client_id=client_id,
                 sid=session_id,
+                model_used=QUERY_REWRITE_MODEL,
                 query_raw=q0[:200],
                 model_out=out[:200],
                 reason=reject_reason,
@@ -154,6 +155,7 @@ def rewrite_query_for_retrieval(
             "retrieval_query_rewrite",
             client_id=client_id,
             sid=session_id,
+            model_used=QUERY_REWRITE_MODEL,
             query_raw=q0[:200],
             query_for_retrieval=effective[:200],
             rewrite_applied=rewrite_applied,
@@ -166,6 +168,7 @@ def rewrite_query_for_retrieval(
             "retrieval_query_rewrite_failed",
             client_id=client_id,
             sid=session_id,
+            model_used=QUERY_REWRITE_MODEL,
             query_raw=q0[:200],
             err=str(e)[:300],
         )
@@ -290,11 +293,20 @@ def generate_answer_with_empathy(
                 pass
         if not (answer or "").strip():
             answer = LLM_FALLBACK_ANSWER
+        log_json(
+            logger,
+            "llm_generate",
+            sid=session_id,
+            model_used=CHAT_MODEL,
+            empathy_used=bool(use_empathy),
+            used_fallback=bool(answer == LLM_FALLBACK_ANSWER),
+        )
     except Exception as e:
         log_json(
             logger,
             "llm_generate_failed",
             sid=session_id,
+            model_used=CHAT_MODEL,
             err=str(e)[:300],
         )
         answer = LLM_FALLBACK_ANSWER

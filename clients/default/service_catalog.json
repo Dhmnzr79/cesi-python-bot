@@ -1,0 +1,53 @@
+{
+  "ct_scan": {
+    "title": "КТ (компьютерная томография)",
+    "aliases": [
+      "кт",
+      "компьютерная томография",
+      "3д снимок зубов",
+      "томография зубов",
+      "диагностика перед имплантацией"
+    ],
+    "active": true,
+    "response_mode": "card",
+    "facts": [
+      "помогает врачу оценить анатомию и объем костной ткани",
+      "используется для точного планирования лечения",
+      "при наличии свежего КТ врач может использовать уже готовое исследование"
+    ],
+    "md_entry_ref": "clinic__info__tomography",
+    "price_key": "ct_scan",
+    "price_ref": null,
+    "concern_ref": "clinic__faq__cost.md#kt",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "professional_whitening": {
+    "title": "Профессиональное отбеливание",
+    "aliases": [
+      "отбеливание",
+      "профессиональное отбеливание",
+      "белые зубы",
+      "осветление эмали",
+      "как отбелить зубы"
+    ],
+    "active": true,
+    "response_mode": "card",
+    "facts": [
+      "проводится после осмотра и оценки состояния эмали",
+      "интенсивность результата индивидуальна",
+      "врач дает рекомендации по сохранению результата"
+    ],
+    "md_entry_ref": "whitening__service__professional_whitening",
+    "price_key": "professional_whitening",
+    "price_ref": null,
+    "concern_ref": "whitening__faq__cost.md#otbelivanie",
+    "price_display": "on_request",
+    "suggest_refs": [
+      {
+        "label": "Подготовка к отбеливанию",
+        "ref": "whitening__service__professional_whitening.md#podgotovka"
+      }
+    ]
+  }
+}

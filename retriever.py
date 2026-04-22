@@ -9,11 +9,11 @@ import numpy as np
 
 from config import (
     BROAD_QUERY_MAX_WORDS,
-    CHAT_MODEL,
     CORPUS_PATH,
     EMB_PATH,
     EMB_MODEL,
     ALIAS_STRONG_THRESHOLD,
+    RERANK_MODEL,
 )
 from llm import client
 from logging_setup import get_logger, log_json
@@ -872,7 +872,13 @@ def llm_rerank(q: str, cands: list) -> dict:
         cand_infos = [chunk_info(ch, ch.get("_score")) for ch in cands]
     except Exception:
         cand_infos = [chunk_info(ch, None) for ch in cands]
-    log_json(logger, "rerank", question=q[:200], candidates=cand_infos)
+    log_json(
+        logger,
+        "rerank",
+        question=q[:200],
+        candidates=cand_infos,
+        model_used=RERANK_MODEL,
+    )
 
     prompt = (
         "Выбери самый уместный фрагмент для ответа на вопрос пользователя. "
@@ -908,7 +914,7 @@ def llm_rerank(q: str, cands: list) -> dict:
     fallback_reason = None
     try:
         out = client.chat.completions.create(
-            model=CHAT_MODEL,
+            model=RERANK_MODEL,
             messages=msgs,
             temperature=0,
             response_format={"type": "json_object"},
@@ -943,6 +949,7 @@ def llm_rerank(q: str, cands: list) -> dict:
     log_json(
         logger,
         "rerank_result",
+        model_used=RERANK_MODEL,
         latency_ms=lat,
         fallback_reason=fallback_reason,
         chosen=chunk_info(
