@@ -1,5 +1,5 @@
 {
-  "ct_scan": {
+  "tomography": {
     "name": "КТ (компьютерная томография)",
     "price_type": "fixed",
     "value": 3000,
