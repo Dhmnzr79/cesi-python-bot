@@ -14,6 +14,8 @@ from config import (
     LEAD_NAME_CLASSIFY_MODEL,
     MEMORY_ON,
     OPENAI_API_KEY,
+    PRICE_INTENT_LLM_MODEL,
+    PRICE_INTENT_LLM_ON,
     QUERY_REWRITE_MAX_MESSAGES,
     QUERY_REWRITE_MODEL,
     QUERY_REWRITE_ON,
@@ -118,7 +120,7 @@ def rewrite_query_for_retrieval(
         resp = client.chat.completions.create(
             model=QUERY_REWRITE_MODEL,
             temperature=0.15,
-            max_tokens=200,
+            max_completion_tokens=200,
             response_format={"type": "json_object"},
             timeout=LLM_REQUEST_TIMEOUT_SEC,
             messages=[
@@ -173,6 +175,55 @@ def rewrite_query_for_retrieval(
             err=str(e)[:300],
         )
         return q0
+
+
+_FACTS_CARD_SYSTEM = (
+    "Ты помощник стоматологической клиники. "
+    "Тебе дан вопрос пациента, название услуги и список фактов о ней. "
+    "Напиши живой разговорный ответ — 2-3 предложения. "
+    "Правила: ответь именно на вопрос пациента (если спрашивает 'делаете ли?' — сначала подтверди одним словом); "
+    "используй ТОЛЬКО факты из списка, ничего не добавляй от себя; "
+    "все цифры и числовые показатели из фактов обязательно сохрани; "
+    "не перечисляй факты списком — пиши текстом; "
+    "тон спокойный и доброжелательный, без канцелярита. "
+    'Ответь одним JSON-объектом с ключом "answer".'
+)
+
+
+def generate_facts_card_answer(
+    title: str,
+    facts: list[str],
+    *,
+    sid: str,
+    client_id: str | None,
+    user_question: str = "",
+) -> str | None:
+    if not facts:
+        return None
+    facts_block = "\n".join(f"- {f}" for f in facts)
+    q_line = f"Вопрос пациента: {user_question}\n\n" if user_question else ""
+    user_msg = f"{q_line}Услуга: {title}\n\nФакты:\n{facts_block}"
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.2,
+            max_completion_tokens=300,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _FACTS_CARD_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        answer = str(obj.get("answer") or "").strip()
+        if answer:
+            log_json(logger, "facts_card_llm", client_id=client_id, sid=sid, title=title)
+            return answer
+    except Exception as exc:
+        log_json(logger, "facts_card_llm_error", client_id=client_id, sid=sid, error=str(exc))
+    return None
 
 
 BASE_SYSTEM = (
@@ -344,7 +395,7 @@ def classify_lead_name_shape(
         resp = client.chat.completions.create(
             model=LEAD_NAME_CLASSIFY_MODEL,
             temperature=0,
-            max_tokens=60,
+            max_completion_tokens=60,
             response_format={"type": "json_object"},
             timeout=LLM_REQUEST_TIMEOUT_SEC,
             messages=[
@@ -402,7 +453,7 @@ def classify_booking_wants_appointment(
         resp = client.chat.completions.create(
             model=BOOKING_INTENT_LLM_MODEL,
             temperature=0,
-            max_tokens=40,
+            max_completion_tokens=40,
             response_format={"type": "json_object"},
             timeout=LLM_REQUEST_TIMEOUT_SEC,
             messages=[
@@ -434,3 +485,60 @@ def classify_booking_wants_appointment(
             err=str(e)[:300],
         )
         return False
+
+
+_PRICE_INTENT_SYSTEM = (
+    "Ты классификатор ценового намерения в чате стоматологии. "
+    "Нужно выбрать один label: "
+    "price_lookup (пользователь спрашивает цену/стоимость конкретной услуги), "
+    "price_concern (сомнение или возражение по цене: дорого, почему так дорого, не по карману), "
+    "other (неценовой вопрос). "
+    "Важно: вопросы про скидки, полис ОМС/ДМС, рассрочку, оплату по частям без жалобы «дорого» — это other. "
+    'Ответь одним JSON-объектом: {"label":"price_lookup|price_concern|other"}. '
+    "Без markdown и текста вне JSON."
+)
+
+
+def classify_price_intent(user_message: str, *, client_id: str | None, sid: str) -> str:
+    if not PRICE_INTENT_LLM_ON:
+        return "other"
+    msg = (user_message or "").strip()
+    if len(msg) < 2:
+        return "other"
+    try:
+        resp = client.chat.completions.create(
+            model=PRICE_INTENT_LLM_MODEL,
+            temperature=0,
+            max_completion_tokens=50,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _PRICE_INTENT_SYSTEM},
+                {"role": "user", "content": msg[:700]},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("price_intent_not_object")
+        label = str(obj.get("label") or "").strip().lower()
+        if label not in {"price_lookup", "price_concern", "other"}:
+            label = "other"
+        log_json(
+            logger,
+            "price_intent_llm",
+            client_id=client_id,
+            sid=sid,
+            label=label,
+            msg_len=len(msg),
+        )
+        return label
+    except Exception as e:
+        log_json(
+            logger,
+            "price_intent_llm_failed",
+            client_id=client_id,
+            sid=sid,
+            err=str(e)[:300],
+        )
+        return "other"

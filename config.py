@@ -21,6 +21,12 @@ BOOKING_INTENT_LLM_ON = os.getenv("BOOKING_INTENT_LLM_ON", "1").lower() in (
     "yes",
 )
 BOOKING_INTENT_LLM_MODEL = (os.getenv("BOOKING_INTENT_LLM_MODEL") or "").strip() or CHAT_MODEL
+PRICE_INTENT_LLM_ON = os.getenv("PRICE_INTENT_LLM_ON", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+PRICE_INTENT_LLM_MODEL = (os.getenv("PRICE_INTENT_LLM_MODEL") or "").strip() or CHAT_MODEL
 QUERY_REWRITE_ON = os.getenv("QUERY_REWRITE_ON", "1").lower() in ("1", "true", "yes")
 QUERY_REWRITE_MAX_MESSAGES = int(os.getenv("QUERY_REWRITE_MAX_MESSAGES", "10"))
 # Подстроки в ответе rewrite → отбросить (утечка инструкции / мусор). Разделитель |
@@ -101,6 +107,18 @@ PRICES_RE = re.compile(
     r"(цена|стоимост|сколько\s+стоит|прайс|расценк|по\s+цене|сколько\s+будет|сколько\s+руб)",
     re.I,
 )
+PRICE_LOOKUP_RE = re.compile(
+    r"(цена|стоимост|сколько\s+стоит|прайс|расценк|по\s+цене|сколько\s+будет|сколько\s+руб|сколько\s+обойд[её]тся?)",
+    re.I,
+)
+# Без «скидк/рассрочк»: вопросы про скидки, полис, рассрочку — обычный retrieval (payment_terms и т.д.),
+# а не price_concern к конкретной услуге.
+PRICE_CONCERN_RE = re.compile(
+    r"(дорог|почему\s+так\s+дорого|слишком\s+дорого|высокая\s+цена|не\s+потяну|не\s+по\s+карману|дешевле|снизить\s+стоимост)",
+    re.I,
+)
+
+PRICE_SERVICE_MATCH_STRONG = float(os.getenv("PRICE_SERVICE_MATCH_STRONG", "0.62"))
 
 # --- Память диалога ---
 MEMORY_ON = True

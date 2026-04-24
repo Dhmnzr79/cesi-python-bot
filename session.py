@@ -65,6 +65,7 @@ def _fresh_defaults() -> dict:
         "shown_cta_topics": [],
         "topic_state": {},
         "last_content_ui_payload": None,
+        "last_catalog_service_id": None,
     }
 
 
@@ -282,6 +283,13 @@ def _upsert_topic_state(st: dict, doc_id: str, patch: dict) -> None:
     }
     cur.update(patch or {})
     ts[doc_id] = cur
+
+
+def set_last_catalog_service(session_id: str, service_id: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["last_catalog_service_id"] = (service_id or "").strip() or None
+        _persist_unlocked(session_id, st)
 
 
 def set_current_doc(session_id: str, doc_id: str) -> None:

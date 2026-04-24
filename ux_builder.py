@@ -3,6 +3,7 @@ import os
 import re
 
 from config import default_cta_dict
+from llm import generate_facts_card_answer
 from meta_loader import get_doc_path
 
 
@@ -274,4 +275,192 @@ def low_score_response(sid: str, client_id: str | None = None) -> dict:
         "situation": {"show": False, "mode": "normal"},
         "offer": None,
         "meta": meta_out,
+    }
+
+
+def _suggest_refs_at_most_one(service: dict | None) -> list:
+    """Не более одной кнопки suggest_ref; пустой список если данных нет."""
+    refs = list((service or {}).get("suggest_refs") or [])
+    if not refs:
+        return []
+    r0 = refs[0]
+    if isinstance(r0, dict):
+        label = (r0.get("label") or "").strip()
+        ref = (r0.get("ref") or "").strip()
+        if label and ref:
+            return [{"label": label, "ref": ref}]
+        return []
+    if isinstance(r0, str) and "#" in r0:
+        return [{"label": r0.split("#", 1)[0].strip() or "Подробнее", "ref": r0}]
+    return []
+
+
+def _format_price_value(price: dict) -> str | None:
+    if not isinstance(price, dict):
+        return None
+    ptype = str(price.get("price_type") or "").strip().lower()
+    cur = str(price.get("currency") or "RUB").strip().upper()
+    symbol = "₽" if cur == "RUB" else cur
+    if ptype == "fixed" and price.get("value") is not None:
+        return f"{int(price['value'])} {symbol}"
+    if ptype == "from" and price.get("value") is not None:
+        return f"от {int(price['value'])} {symbol}"
+    if ptype == "range" and price.get("value_min") is not None and price.get("value_max") is not None:
+        return f"{int(price['value_min'])}–{int(price['value_max'])} {symbol}"
+    return None
+
+
+def build_service_facts_card_payload(
+    *,
+    sid: str,
+    client_id: str | None,
+    service_id: str,
+    service: dict,
+    match_score: float,
+    user_question: str = "",
+) -> dict:
+    """Короткий ответ только из facts каталога (md_entry_ref = null)."""
+    title = str((service or {}).get("title") or service_id).strip()
+    facts = [
+        str(x).strip()
+        for x in ((service or {}).get("facts") or [])
+        if str(x).strip()
+    ]
+    llm_answer = generate_facts_card_answer(
+        title, facts, sid=sid, client_id=client_id, user_question=user_question
+    )
+    if llm_answer:
+        answer = llm_answer
+    else:
+        lines = "\n".join(f"• {t}" for t in facts)
+        answer = f"{title}\n\n{lines}" if lines else title
+    quick = _suggest_refs_at_most_one(service)
+    return {
+        "answer": answer,
+        "quick_replies": quick,
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {
+            "sid": sid,
+            "client_id": client_id,
+            "intent": "catalog_facts",
+            "matched_service_id": service_id,
+            "match_score": round(float(match_score or 0.0), 4),
+            "route_source": "catalog",
+            "followups": [],
+        },
+    }
+
+
+def build_price_lookup_payload(
+    *,
+    sid: str,
+    client_id: str | None,
+    service_id: str,
+    service: dict,
+    match_score: float,
+    route_source: str,
+    price_key: str | None,
+    price_ref: str | None,
+    price_item: dict | None,
+) -> dict:
+    title = str((service or {}).get("title") or service_id).strip()
+    rendered = _format_price_value(price_item or {})
+    note = (price_item or {}).get("note")
+    if rendered:
+        answer = f"{title}: {rendered}."
+        if isinstance(note, str) and note.strip():
+            answer += f" Важно: {note.strip()}."
+    else:
+        answer = (
+            f"По услуге «{title}» сейчас не вижу точной цены в ценовом слое. "
+            "Могу уточнить формат услуги или передать запрос администратору."
+        )
+    # price_lookup: ответ «закрыт», без кнопок и без CTA (сценарий «человек думает»).
+    return {
+        "answer": answer,
+        "quick_replies": [],
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {
+            "sid": sid,
+            "client_id": client_id,
+            "intent": "price_lookup",
+            "matched_service_id": service_id,
+            "match_score": round(float(match_score or 0.0), 4),
+            "route_source": route_source,
+            "price_key": price_key,
+            "price_ref": price_ref,
+            "fallback_reason": None if rendered else "price_not_found",
+            "followups": [],
+        },
+    }
+
+
+def build_price_concern_payload(
+    *,
+    sid: str,
+    client_id: str | None,
+    service_id: str,
+    service: dict,
+    match_score: float,
+) -> dict:
+    title = str((service or {}).get("title") or service_id).strip()
+    quick = _suggest_refs_at_most_one(service)
+    return {
+        "answer": (
+            f"Понимаю сомнение по стоимости «{title}». "
+            "Цена зависит от клинической ситуации, объема работ и выбранного протокола. "
+            "На консультации можно подобрать вариант под ваш бюджет без лишних этапов."
+        ),
+        "quick_replies": quick,
+        "cta": default_cta_dict(),
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {
+            "sid": sid,
+            "client_id": client_id,
+            "intent": "price_concern",
+            "matched_service_id": service_id,
+            "match_score": round(float(match_score or 0.0), 4),
+            "route_source": "catalog",
+            "price_key": (service or {}).get("price_key"),
+            "price_ref": (service or {}).get("price_ref"),
+            "fallback_reason": None,
+            "followups": [],
+        },
+    }
+
+
+def build_price_clarify_payload(
+    *,
+    sid: str,
+    client_id: str | None,
+    intent: str,
+    fallback_reason: str,
+) -> dict:
+    return {
+        "answer": "Уточните, пожалуйста, какую именно услугу вы имеете в виду, и я отвечу точнее по цене.",
+        "quick_replies": [],
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {
+            "sid": sid,
+            "client_id": client_id,
+            "intent": intent,
+            "matched_service_id": None,
+            "match_score": 0.0,
+            "route_source": "catalog",
+            "price_key": None,
+            "price_ref": None,
+            "fallback_reason": fallback_reason,
+            "followups": [],
+        },
     }

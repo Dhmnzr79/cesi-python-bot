@@ -1,16 +1,19 @@
 import os
+import re
 import time
 import inspect
 
 from flask import Flask, jsonify, request, send_from_directory
 import session as session_mod
 
-from config import ALIAS_STRONG_THRESHOLD, DEBUG_TOKEN, PORT, resolve_client_id
+from config import ALIAS_STRONG_THRESHOLD, CONTACTS_RE, DEBUG_TOKEN, PORT, PRICE_LOOKUP_RE, PRICE_CONCERN_RE, resolve_client_id
 from lead_service import handle_lead
 from logging_setup import get_logger, make_request_context, log_json
 from chunk_responder import respond_from_chunk
 from flow_handlers import handle_flows
+from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
+from query_selector import select_price_service_route
 from policy import (
     apply_response_policy,
 )
@@ -28,10 +31,16 @@ from session import (
     mem_add_user,
     mem_get,
     mem_reset,
+    parse_yes,
     record_last_bot_payload,
+    set_last_catalog_service,
     sid_from_body,
 )
 from ux_builder import (
+    build_price_clarify_payload,
+    build_price_concern_payload,
+    build_price_lookup_payload,
+    build_service_facts_card_payload,
     empty_question_response,
     internal_error_response,
     low_score_response,
@@ -182,6 +191,29 @@ def _sanitize(x):
     return _to_plain(x)
 
 
+def _is_short_contextual(q: str, st: dict) -> bool:
+    """True если запрос короткий и без явного интента — нет смысла гнать в retrieval."""
+    tokens = q.split()
+    if len(tokens) > 3:
+        return False
+    if PRICE_LOOKUP_RE.search(q) or PRICE_CONCERN_RE.search(q) or CONTACTS_RE.search(q):
+        return False
+    # parse_yes уже обработан в handle_flows для known состояний.
+    # Здесь ловим его только если last_bot_action == "none" (нет pending действия).
+    last_action = st.get("last_bot_action") or "none"
+    if parse_yes(q) and last_action == "none":
+        return True
+    # Короткие нейтральные реплики: "понятно", "спасибо", "хм", "ясно" и т.п.
+    _NEUTRAL_RX = re.compile(
+        r"^(понятно|спасибо|хм+|ясно|окей|ок|ok|интересно|угу|ага|ладно|"
+        r"хорошо|понял|поняла|ничего|неплохо|круто|отлично|супер)\W*$",
+        re.I,
+    )
+    if _NEUTRAL_RX.search(q):
+        return True
+    return False
+
+
 def safe_jsonify(payload):
     return jsonify(_sanitize(payload))
 
@@ -326,6 +358,140 @@ def ask():
 
         if not q:
             return _service_reply(empty_question_response(), sid, q, track_user=False)
+
+        # Короткие реплики без явного интента — обрабатываем через контекст сессии.
+        # Предотвращает падение "да", "понятно", "хорошо" в retrieval с низким score.
+        if _is_short_contextual(q, st):
+            current_doc_id = (st.get("current_doc_id") or "").strip()
+            if current_doc_id:
+                ch = get_chunk_by_ref(f"{current_doc_id}#korotko", client_id=client_id)
+                if ch:
+                    return respond_from_chunk(
+                        chunk=ch,
+                        q=q,
+                        sid=sid,
+                        client_id=client_id,
+                        finalize_ask=finalize_ask,
+                        safe_jsonify=safe_jsonify,
+                        logger=logger,
+                        llm_question=q,
+                        log_event="Answer from short_contextual fallback",
+                    )
+
+        price_route = select_price_service_route(q, client_id=client_id, sid=sid)
+        if price_route.get("mode") == "clarify":
+            payload = build_price_clarify_payload(
+                sid=sid,
+                client_id=client_id,
+                intent=str(price_route.get("intent") or "other"),
+                fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+            )
+            log_json(logger, "price_route", **(payload.get("meta") or {}))
+            return _service_reply(payload, sid, q)
+        if price_route.get("mode") == "matched":
+            intent = str(price_route.get("intent") or "other")
+            service = price_route.get("service") or {}
+            service_id = str(price_route.get("matched_service_id") or "")
+            match_score = float(price_route.get("match_score") or 0.0)
+            route_source = str(price_route.get("route_source") or "catalog")
+            if intent == "price_concern":
+                concern_ref = str(service.get("concern_ref") or "").strip()
+                if concern_ref:
+                    ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+                    if ch:
+                        log_json(
+                            logger,
+                            "price_route",
+                            intent="price_concern",
+                            matched_service_id=service_id,
+                            match_score=round(match_score, 4),
+                            route_source="concern_ref",
+                            concern_ref=concern_ref,
+                            fallback_reason=None,
+                        )
+                        return respond_from_chunk(
+                            chunk=ch,
+                            q=q,
+                            sid=sid,
+                            client_id=client_id,
+                            finalize_ask=finalize_ask,
+                            safe_jsonify=safe_jsonify,
+                            logger=logger,
+                            llm_question=q,
+                            log_event="Answer generated from concern_ref",
+                        )
+                payload = build_price_concern_payload(
+                    sid=sid,
+                    client_id=client_id,
+                    service_id=service_id,
+                    service=service,
+                    match_score=match_score,
+                )
+                log_json(logger, "price_route", **(payload.get("meta") or {}))
+                return _service_reply(payload, sid, q)
+            if route_source == "price_ref" and price_route.get("price_ref"):
+                ref = str(price_route.get("price_ref") or "").strip()
+                ch = get_chunk_by_ref(ref, client_id=client_id)
+                if ch:
+                    log_json(
+                        logger,
+                        "price_route",
+                        intent="price_lookup",
+                        matched_service_id=service_id,
+                        match_score=round(match_score, 4),
+                        route_source="price_ref",
+                        price_key=price_route.get("price_key"),
+                        price_ref=ref,
+                        fallback_reason=None,
+                    )
+                    return respond_from_chunk(
+                        chunk=ch,
+                        q=q,
+                        sid=sid,
+                        client_id=client_id,
+                        finalize_ask=finalize_ask,
+                        safe_jsonify=safe_jsonify,
+                        logger=logger,
+                        llm_question=q or f"Цена по {ref}",
+                        log_event="Answer generated from price_ref",
+                    )
+            payload = build_price_lookup_payload(
+                sid=sid,
+                client_id=client_id,
+                service_id=service_id,
+                service=service,
+                match_score=match_score,
+                route_source=route_source,
+                price_key=price_route.get("price_key"),
+                price_ref=price_route.get("price_ref"),
+                price_item=price_route.get("price_item"),
+            )
+            log_json(logger, "price_route", **(payload.get("meta") or {}))
+            return _service_reply(payload, sid, q)
+
+        if price_route.get("mode") == "other":
+            cat = select_catalog_content_route(q, client_id=client_id)
+            if cat.get("mode") == "facts":
+                svc = cat.get("service") or {}
+                sid_svc = str(cat.get("matched_service_id") or "")
+                payload = build_service_facts_card_payload(
+                    sid=sid,
+                    client_id=client_id,
+                    service_id=sid_svc,
+                    service=svc,
+                    match_score=float(cat.get("match_score") or 0.0),
+                    user_question=q,
+                )
+                log_json(
+                    logger,
+                    "catalog_route",
+                    route="facts",
+                    matched_service_id=sid_svc,
+                    match_score=cat.get("match_score"),
+                )
+                if sid_svc:
+                    set_last_catalog_service(sid, sid_svc)
+                return _service_reply(payload, sid, q, doc_id=None)
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
         selection = select_chunk_for_question(q, client_id=client_id, sid=sid)

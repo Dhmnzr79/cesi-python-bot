@@ -2,11 +2,11 @@
   "tomography": {
     "title": "КТ (компьютерная томография)",
     "aliases": [
-      "нужно ли кт перед имплантацией зубов",
-      "зачем делать кт зубов перед лечением",
-      "можно ли прийти на консультацию со своим кт",
       "кт",
-      "компьютерная томография"
+      "кт зубов",
+      "компьютерная томография",
+      "снимок зуба",
+      "томография зуба"
     ],
     "active": true,
     "response_mode": "card",
@@ -15,7 +15,7 @@
       "используется для точного планирования лечения",
       "при наличии свежего КТ (до 1 месяца) врач может использовать уже готовое исследование"
     ],
-    "md_entry_ref": "clinic__info__tomography",
+    "md_entry_ref": null,
     "price_key": "tomography",
     "price_ref": null,
     "price_display": "always",
@@ -29,9 +29,11 @@
   "professional_whitening": {
     "title": "Профессиональное отбеливание",
     "aliases": [
-      "профессиональное отбеливание зубов",
-      "отбеливание зубов у стоматолога",
-      "безопасно ли профессиональное отбеливание зубов"
+      "отбеливание",
+      "отбеливание зубов",
+      "отбелить зубы",
+      "осветлить зубы",
+      "зубы пожелтели"
     ],
     "active": true,
     "response_mode": "card",
@@ -42,10 +44,178 @@
       "даёт предсказуемый результат, потому что врач заранее оценивает эффект",
       "сохраняет эффект на 3–5 лет при правильном уходе"
     ],
-    "md_entry_ref": "whitening__service__professional_whitening",
+    "md_entry_ref": null,
     "price_key": "professional_whitening",
     "price_ref": null,
-    "price_display": "on_request",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "all_on_6": {
+    "title": "Имплантация All-on-6",
+    "aliases": [
+      "all-on-6",
+      "имплантация all-on-6",
+      "все на шести",
+      "все зубы на 6 имплантах",
+      "протез на 6 имплантах"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "implantation__service__all_on_6",
+    "price_key": "all_on_6",
+    "price_ref": null,
+    "concern_ref": "implantation__faq__cost",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "all_on_4": {
+    "title": "Имплантация All-on-4",
+    "aliases": [
+      "all-on-4",
+      "имплантация all-on-4",
+      "все на четырёх",
+      "восстановление всех зубов на 4",
+      "протез на 4 имплантах"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "implantation__service__all_on_4",
+    "price_key": "all_on_4",
+    "price_ref": null,
+    "concern_ref": "implantation__faq__cost",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "classic": {
+    "title": "Классическая имплантация",
+    "aliases": [
+      "имплант",
+      "имплантация",
+      "классическая имплантация",
+      "поставить имплант",
+      "вставить зуб",
+      "двухэтапная имплантация"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "implantation__service__classic",
+    "price_key": "classic",
+    "price_ref": null,
+    "concern_ref": "implantation__faq__cost",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "one_stage": {
+    "title": "Одномоментная имплантация",
+    "aliases": [
+      "одномоментная имплантация",
+      "имплант сразу после удаления",
+      "удаление и имплант",
+      "имплант в день удаления"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "implantation__service__one_stage",
+    "price_key": "one_stage",
+    "price_ref": null,
+    "concern_ref": "implantation__faq__cost",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "temporary_teeth": {
+    "title": "Временные зубы на имплантах",
+    "aliases": [
+      "временные зубы",
+      "временная коронка",
+      "временный зуб на имплант",
+      "временные зубы на имплантах"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "implantation__service__temporary_teeth",
+    "price_key": "temporary_teeth",
+    "price_ref": null,
+    "concern_ref": "implantation__faq__cost",
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "aligners": {
+    "title": "Элайнеры для выравнивания зубов",
+    "aliases": [
+      "элайнеры",
+      "капы для зубов",
+      "прозрачные капы",
+      "выровнять зубы",
+      "исправить прикус",
+      "кривые зубы"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "orthodontics__service__aligners",
+    "price_key": "aligners",
+    "price_ref": null,
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "veneers": {
+    "title": "Виниры E-max",
+    "aliases": [
+      "виниры",
+      "виниры на зубы",
+      "виниры e-max",
+      "голливудская улыбка",
+      "накладки на зубы"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "prosthetics__service__veneers",
+    "price_key": "veneers",
+    "price_ref": null,
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "zirconia_crowns": {
+    "title": "Коронки из диоксида циркония",
+    "aliases": [
+      "коронки",
+      "коронка на зуб",
+      "циркониевая коронка",
+      "зубная коронка",
+      "поставить коронку"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "prosthetics__service__zirconia_crowns",
+    "price_key": "zirconia_crowns",
+    "price_ref": null,
+    "price_display": "always",
+    "suggest_refs": []
+  },
+  "teeth_treatment": {
+    "title": "Лечение зубов",
+    "aliases": [
+      "лечение зубов",
+      "вылечить зуб",
+      "кариес",
+      "болит зуб",
+      "дырка в зубе",
+      "лечение кариеса"
+    ],
+    "active": true,
+    "response_mode": null,
+    "facts": [],
+    "md_entry_ref": "treatment__service__teeth_treatment",
+    "price_key": "teeth_treatment",
+    "price_ref": null,
+    "price_display": "always",
     "suggest_refs": []
   }
 }

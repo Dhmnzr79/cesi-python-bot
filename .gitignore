@@ -24,5 +24,9 @@ logs/*.jsonl
 # Резервные копии редактора
 .history/
 
+# IDE и инструменты разработки
+.claude/
+.cursor/
+
 .DS_Store
 Thumbs.db
