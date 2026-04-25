@@ -8,10 +8,10 @@ load_dotenv()
 
 # --- OpenAI ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMB_MODEL = os.getenv("MODEL_EMBED", "text-embedding-3-small")
+EMB_MODEL = os.getenv("MODEL_EMBED", "text-embedding-3-large")
 CHAT_MODEL = os.getenv("MODEL_CHAT", "gpt-5.4-mini")
-QUERY_REWRITE_MODEL = (os.getenv("MODEL_QUERY_REWRITE") or "").strip() or "gpt-5-mini"
-RERANK_MODEL = (os.getenv("MODEL_RERANK") or "").strip() or "gpt-5.4-nano"
+QUERY_REWRITE_MODEL = (os.getenv("MODEL_QUERY_REWRITE") or "").strip() or "gpt-5.4-nano"
+RERANK_MODEL = (os.getenv("MODEL_RERANK") or "").strip() or "gpt-5.4-mini"
 LEAD_NAME_CLASSIFY_MODEL = (os.getenv("MODEL_LEAD_NAME") or "").strip() or CHAT_MODEL
 
 # --- Намерение «записаться» (regex + при необходимости LLM) ---
@@ -20,7 +20,7 @@ BOOKING_INTENT_LLM_ON = os.getenv("BOOKING_INTENT_LLM_ON", "1").lower() in (
     "true",
     "yes",
 )
-BOOKING_INTENT_LLM_MODEL = (os.getenv("BOOKING_INTENT_LLM_MODEL") or "").strip() or CHAT_MODEL
+BOOKING_INTENT_LLM_MODEL = (os.getenv("BOOKING_INTENT_LLM_MODEL") or "").strip() or "gpt-5.4-nano"
 PRICE_INTENT_LLM_ON = os.getenv("PRICE_INTENT_LLM_ON", "1").lower() in (
     "1",
     "true",

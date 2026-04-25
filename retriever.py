@@ -83,6 +83,8 @@ def get_chunk_by_ref(ref: str, *, client_id: str | None = None) -> dict | None:
         return None
     fname, anchor = ref.split("#", 1)
     base = os.path.basename(fname)
+    if not base.endswith(".md"):
+        base = base + ".md"
     a = (anchor or "").strip().lower()
     corpus = load_corpus_if_needed()
     cands = [ch for ch in corpus if os.path.basename(ch.get("file", "") or "") == base]

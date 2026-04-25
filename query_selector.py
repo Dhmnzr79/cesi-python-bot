@@ -12,11 +12,6 @@ from config import (
     PRICE_CONCERN_RE,
     PRICE_LOOKUP_RE,
     PRICE_SERVICE_MATCH_STRONG,
-    RERANK_GAP_MAX,
-    RERANK_NEAR_LOW_GAP_MAX,
-    RERANK_NEAR_LOW_TOP_MAX,
-    RERANK_TOP_MAX,
-    RERANK_TOP_MIN,
 )
 import alias_lexical
 from llm import classify_price_intent, rewrite_query_for_retrieval
@@ -155,45 +150,19 @@ def select_chunk_for_question(
                 ),
             }
 
-    if alias_strong and alias_leader is not None:
-        strong = dict(alias_leader)
-        strong["_alias_score"] = round(alias_score, 4)
-        strong["_score"] = round(float(alias_score), 4)
-        return {
-            "mode": "chunk",
-            "chunk": strong,
-            "rerank_applied": False,
-            "debug_meta": _dm(
-                {
-                    "selected_by": "alias",
-                    "alias_score": round(float(alias_score or 0.0), 4),
-                    "top_score": round(top_score, 4),
-                }
-            ),
-        }
-
     top = cands[0]
     score_gap = (
         abs(float(cands[0].get("_score") or 0.0) - float(cands[1].get("_score") or 0.0))
         if len(cands) >= 2
         else 1.0
     )
-    narrow_rerank = (
-        RERANK_TOP_MIN <= top_score <= RERANK_TOP_MAX
-        and len(cands) >= 2
-        and score_gap <= RERANK_GAP_MAX
-        and not is_point_literal_query(q_policy)
-        and not alias_strong
-    )
-    near_low_rerank = (
+    use_rerank = (
         len(cands) >= 2
-        and RERANK_TOP_MIN <= top_score <= RERANK_NEAR_LOW_TOP_MAX
-        and top_score < LOW_SCORE_THRESHOLD + 0.02
-        and score_gap <= RERANK_NEAR_LOW_GAP_MAX
+        and top_score >= LOW_SCORE_THRESHOLD
+        and top_score < 0.75
+        and score_gap < 0.15
         and not is_point_literal_query(q_policy)
-        and not alias_strong
     )
-    use_rerank = narrow_rerank or near_low_rerank
     if use_rerank:
         top = llm_rerank(q_user, cands[:3])
 
@@ -207,7 +176,6 @@ def select_chunk_for_question(
                 "top_score": round(top_score, 4),
                 "score_gap": round(float(score_gap), 4),
                 "alias_score": round(float(alias_score or 0.0), 4),
-                "rerank_near_low": bool(near_low_rerank and not narrow_rerank),
             }
         ),
     }
@@ -397,9 +365,12 @@ def _service_from_session_context(sid: str | None, client_id: str | None) -> dic
 
 
 def select_price_service_route(
-    q: str, *, client_id: str | None, sid: str | None = None
+    q: str, *, client_id: str | None, sid: str | None = None, intent_override: str | None = None
 ) -> dict:
-    intent = classify_price_route_intent(q, client_id=client_id, sid=sid)
+    if intent_override in ("price_lookup", "price_concern"):
+        intent = intent_override
+    else:
+        intent = classify_price_route_intent(q, client_id=client_id, sid=sid)
     if intent == "other":
         return {"mode": "other", "intent": intent}
     match = match_service_from_catalog(q, client_id=client_id)

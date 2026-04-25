@@ -1,21 +1,26 @@
 import os
 import re
+import sys
 import time
 import inspect
+import json
+import numpy as np
 
 from flask import Flask, jsonify, request, send_from_directory
 import session as session_mod
 
-from config import ALIAS_STRONG_THRESHOLD, CONTACTS_RE, DEBUG_TOKEN, PORT, PRICE_LOOKUP_RE, PRICE_CONCERN_RE, resolve_client_id
+from config import ALIAS_STRONG_THRESHOLD, CONTACTS_RE, DEBUG_TOKEN, PORT, PRICE_LOOKUP_RE, PRICE_CONCERN_RE, DEFAULT_CLIENT_ID, resolve_client_id
 from lead_service import handle_lead
 from logging_setup import get_logger, make_request_context, log_json
 from chunk_responder import respond_from_chunk
 from flow_handlers import handle_flows
+from llm import classify_intent
 from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
 from policy import (
     apply_response_policy,
+    pick_contacts_chunk,
 )
 from retriever import (
     alias_hit_score_for_chunk,
@@ -255,6 +260,69 @@ def _log_selection(
 log_json(logger, "app_start", env=os.getenv("APP_ENV"), version=os.getenv("APP_VERSION"))
 
 
+def _startup_check() -> None:
+    emb_path = os.path.join("data", "embeddings.npy")
+    corpus_path = os.path.join("data", "corpus.jsonl")
+    service_catalog_path = os.path.join("clients", DEFAULT_CLIENT_ID, "service_catalog.json")
+    prices_path = os.path.join("clients", DEFAULT_CLIENT_ID, "prices.json")
+
+    if not os.path.isfile(emb_path):
+        logger.error("startup_check_failed: embeddings file is missing: %s", emb_path)
+        sys.exit(1)
+    try:
+        arr = np.load(emb_path)
+        if not isinstance(arr, np.ndarray):
+            logger.error("startup_check_failed: embeddings file is not a numpy array: %s", emb_path)
+            sys.exit(1)
+    except Exception as e:
+        logger.error("startup_check_failed: cannot read embeddings file %s: %s", emb_path, e)
+        sys.exit(1)
+
+    if not os.path.isfile(corpus_path):
+        logger.error("startup_check_failed: corpus file is missing: %s", corpus_path)
+        sys.exit(1)
+    try:
+        with open(corpus_path, "r", encoding="utf-8") as f:
+            chunks = sum(1 for line in f if line.strip())
+    except Exception as e:
+        logger.error("startup_check_failed: cannot read corpus file %s: %s", corpus_path, e)
+        sys.exit(1)
+    if chunks == 0:
+        logger.error("startup_check_failed: corpus file is empty: %s", corpus_path)
+        sys.exit(1)
+
+    if not os.path.isfile(service_catalog_path):
+        logger.error("startup_check_failed: service catalog file is missing: %s", service_catalog_path)
+        sys.exit(1)
+    try:
+        with open(service_catalog_path, "r", encoding="utf-8") as f:
+            service_catalog = json.load(f)
+        if not isinstance(service_catalog, dict):
+            logger.error("startup_check_failed: service catalog must be a JSON object: %s", service_catalog_path)
+            sys.exit(1)
+    except Exception as e:
+        logger.error("startup_check_failed: invalid service catalog file %s: %s", service_catalog_path, e)
+        sys.exit(1)
+
+    if not os.path.isfile(prices_path):
+        logger.error("startup_check_failed: prices file is missing: %s", prices_path)
+        sys.exit(1)
+    try:
+        with open(prices_path, "r", encoding="utf-8") as f:
+            prices = json.load(f)
+        if not isinstance(prices, dict):
+            logger.error("startup_check_failed: prices must be a JSON object: %s", prices_path)
+            sys.exit(1)
+    except Exception as e:
+        logger.error("startup_check_failed: invalid prices file %s: %s", prices_path, e)
+        sys.exit(1)
+
+    log_json(logger, "startup_check_ok", chunks=chunks, services=len(service_catalog))
+
+
+_startup_check()
+
+
 @app.before_request
 def _before():
     request.ctx = make_request_context(session_id=request.cookies.get("sid"))
@@ -378,35 +446,94 @@ def ask():
                         log_event="Answer from short_contextual fallback",
                     )
 
-        price_route = select_price_service_route(q, client_id=client_id, sid=sid)
-        if price_route.get("mode") == "clarify":
-            payload = build_price_clarify_payload(
-                sid=sid,
+        intent = classify_intent(q, client_id=client_id, sid=sid)
+
+        if intent == "contacts":
+            cands = retrieve(q, topk=4, client_id=client_id)
+            picked = pick_contacts_chunk(cands)
+            if picked:
+                return respond_from_chunk(
+                    chunk=picked,
+                    q=q,
+                    sid=sid,
+                    client_id=client_id,
+                    finalize_ask=finalize_ask,
+                    safe_jsonify=safe_jsonify,
+                    logger=logger,
+                    llm_question=q,
+                    log_event="Answer generated from contacts intent",
+                )
+
+        if intent in ("price_lookup", "price_concern"):
+            price_route = select_price_service_route(
+                q,
                 client_id=client_id,
-                intent=str(price_route.get("intent") or "other"),
-                fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                sid=sid,
+                intent_override=intent,
             )
-            log_json(logger, "price_route", **(payload.get("meta") or {}))
-            return _service_reply(payload, sid, q)
-        if price_route.get("mode") == "matched":
-            intent = str(price_route.get("intent") or "other")
-            service = price_route.get("service") or {}
-            service_id = str(price_route.get("matched_service_id") or "")
-            match_score = float(price_route.get("match_score") or 0.0)
-            route_source = str(price_route.get("route_source") or "catalog")
-            if intent == "price_concern":
-                concern_ref = str(service.get("concern_ref") or "").strip()
-                if concern_ref:
-                    ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+            if price_route.get("mode") == "clarify":
+                payload = build_price_clarify_payload(
+                    sid=sid,
+                    client_id=client_id,
+                    intent=str(price_route.get("intent") or "other"),
+                    fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                )
+                log_json(logger, "price_route", **(payload.get("meta") or {}))
+                return _service_reply(payload, sid, q)
+            if price_route.get("mode") == "matched":
+                intent = str(price_route.get("intent") or "other")
+                service = price_route.get("service") or {}
+                service_id = str(price_route.get("matched_service_id") or "")
+                match_score = float(price_route.get("match_score") or 0.0)
+                route_source = str(price_route.get("route_source") or "catalog")
+                if intent == "price_concern":
+                    concern_ref = str(service.get("concern_ref") or "").strip()
+                    if concern_ref:
+                        ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+                        if ch:
+                            log_json(
+                                logger,
+                                "price_route",
+                                intent="price_concern",
+                                matched_service_id=service_id,
+                                match_score=round(match_score, 4),
+                                route_source="concern_ref",
+                                concern_ref=concern_ref,
+                                fallback_reason=None,
+                            )
+                            return respond_from_chunk(
+                                chunk=ch,
+                                q=q,
+                                sid=sid,
+                                client_id=client_id,
+                                finalize_ask=finalize_ask,
+                                safe_jsonify=safe_jsonify,
+                                logger=logger,
+                                llm_question=q,
+                                log_event="Answer generated from concern_ref",
+                            )
+                    payload = build_price_concern_payload(
+                        sid=sid,
+                        client_id=client_id,
+                        service_id=service_id,
+                        service=service,
+                        match_score=match_score,
+                    )
+                    log_json(logger, "price_route", **(payload.get("meta") or {}))
+                    return _service_reply(payload, sid, q)
+                if route_source == "price_ref" and price_route.get("price_ref"):
+                    ref = str(price_route.get("price_ref") or "").strip()
+                    ch = get_chunk_by_ref(ref, client_id=client_id)
                     if ch:
                         log_json(
                             logger,
                             "price_route",
-                            intent="price_concern",
+                            intent="price_lookup",
                             matched_service_id=service_id,
                             match_score=round(match_score, 4),
-                            route_source="concern_ref",
-                            concern_ref=concern_ref,
+                            route_source="price_ref",
+                            price_key=price_route.get("price_key"),
+                            price_ref=ref,
                             fallback_reason=None,
                         )
                         return respond_from_chunk(
@@ -417,59 +544,24 @@ def ask():
                             finalize_ask=finalize_ask,
                             safe_jsonify=safe_jsonify,
                             logger=logger,
-                            llm_question=q,
-                            log_event="Answer generated from concern_ref",
+                            llm_question=q or f"Цена по {ref}",
+                            log_event="Answer generated from price_ref",
                         )
-                payload = build_price_concern_payload(
+                payload = build_price_lookup_payload(
                     sid=sid,
                     client_id=client_id,
                     service_id=service_id,
                     service=service,
                     match_score=match_score,
+                    route_source=route_source,
+                    price_key=price_route.get("price_key"),
+                    price_ref=price_route.get("price_ref"),
+                    price_item=price_route.get("price_item"),
                 )
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
                 return _service_reply(payload, sid, q)
-            if route_source == "price_ref" and price_route.get("price_ref"):
-                ref = str(price_route.get("price_ref") or "").strip()
-                ch = get_chunk_by_ref(ref, client_id=client_id)
-                if ch:
-                    log_json(
-                        logger,
-                        "price_route",
-                        intent="price_lookup",
-                        matched_service_id=service_id,
-                        match_score=round(match_score, 4),
-                        route_source="price_ref",
-                        price_key=price_route.get("price_key"),
-                        price_ref=ref,
-                        fallback_reason=None,
-                    )
-                    return respond_from_chunk(
-                        chunk=ch,
-                        q=q,
-                        sid=sid,
-                        client_id=client_id,
-                        finalize_ask=finalize_ask,
-                        safe_jsonify=safe_jsonify,
-                        logger=logger,
-                        llm_question=q or f"Цена по {ref}",
-                        log_event="Answer generated from price_ref",
-                    )
-            payload = build_price_lookup_payload(
-                sid=sid,
-                client_id=client_id,
-                service_id=service_id,
-                service=service,
-                match_score=match_score,
-                route_source=route_source,
-                price_key=price_route.get("price_key"),
-                price_ref=price_route.get("price_ref"),
-                price_item=price_route.get("price_item"),
-            )
-            log_json(logger, "price_route", **(payload.get("meta") or {}))
-            return _service_reply(payload, sid, q)
 
-        if price_route.get("mode") == "other":
+        if intent == "content":
             cat = select_catalog_content_route(q, client_id=client_id)
             if cat.get("mode") == "facts":
                 svc = cat.get("service") or {}

@@ -65,7 +65,7 @@
     "md_entry_ref": "implantation__service__all_on_6",
     "price_key": "all_on_6",
     "price_ref": null,
-    "concern_ref": "implantation__faq__cost",
+    "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
   },
@@ -84,7 +84,7 @@
     "md_entry_ref": "implantation__service__all_on_4",
     "price_key": "all_on_4",
     "price_ref": null,
-    "concern_ref": "implantation__faq__cost",
+    "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
   },
@@ -104,7 +104,7 @@
     "md_entry_ref": "implantation__service__classic",
     "price_key": "classic",
     "price_ref": null,
-    "concern_ref": "implantation__faq__cost",
+    "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
   },
@@ -122,7 +122,7 @@
     "md_entry_ref": "implantation__service__one_stage",
     "price_key": "one_stage",
     "price_ref": null,
-    "concern_ref": "implantation__faq__cost",
+    "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
   },
@@ -140,7 +140,7 @@
     "md_entry_ref": "implantation__service__temporary_teeth",
     "price_key": "temporary_teeth",
     "price_ref": null,
-    "concern_ref": "implantation__faq__cost",
+    "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
   },

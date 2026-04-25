@@ -119,7 +119,6 @@ def rewrite_query_for_retrieval(
     try:
         resp = client.chat.completions.create(
             model=QUERY_REWRITE_MODEL,
-            temperature=0.15,
             max_completion_tokens=200,
             response_format={"type": "json_object"},
             timeout=LLM_REQUEST_TIMEOUT_SEC,
@@ -542,3 +541,59 @@ def classify_price_intent(user_message: str, *, client_id: str | None, sid: str)
             err=str(e)[:300],
         )
         return "other"
+
+
+_INTENT_CLASSIFY_SYSTEM = (
+    "Ты классификатор намерения пользователя в чате стоматологии. "
+    "Определи intent по одному сообщению пациента.\n\n"
+    "Значения intent:\n"
+    "- contacts: адрес, телефон, как доехать, время работы, график\n"
+    "- price_lookup: вопрос про цену или стоимость конкретной услуги\n"
+    "- price_concern: сомнение по цене — дорого, почему так дорого, "
+    "не по карману, у конкурентов дешевле\n"
+    "- content: всё остальное — услуги, врачи, процедуры, страхи, "
+    "сроки, безопасность, рассрочка, противопоказания и т.д.\n\n"
+    "Важно: рассрочка, полис, скидки без жалобы дорого — content.\n"
+    "FAQ как записаться / куда звонить — content.\n"
+    'Ответь одним JSON: {"intent": "contacts|price_lookup|'
+    'price_concern|content"}. Без markdown.'
+)
+
+
+def classify_intent(
+    user_message: str, *, client_id: str | None, sid: str
+) -> str:
+    msg = (user_message or "").strip()
+    if len(msg) < 2:
+        return "content"
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0,
+            max_completion_tokens=50,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _INTENT_CLASSIFY_SYSTEM},
+                {"role": "user", "content": msg[:700]},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("intent_not_object")
+        intent = str(obj.get("intent") or "").strip().lower()
+        if intent not in {"contacts", "price_lookup", "price_concern", "content"}:
+            intent = "content"
+        log_json(
+            logger, "intent_classify",
+            client_id=client_id, sid=sid,
+            intent=intent, msg_len=len(msg),
+        )
+        return intent
+    except Exception as e:
+        log_json(
+            logger, "intent_classify_failed",
+            client_id=client_id, sid=sid, err=str(e)[:300],
+        )
+        return "content"
