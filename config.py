@@ -61,12 +61,6 @@ BROAD_QUERY_MAX_WORDS = int(os.getenv("BROAD_QUERY_MAX_WORDS", "5"))
 ALIAS_STRONG_THRESHOLD = float(os.getenv("ALIAS_STRONG_THRESHOLD", "0.82"))
 ALIAS_SOFT_THRESHOLD = float(os.getenv("ALIAS_SOFT_THRESHOLD", "0.72"))
 
-# Selective rerank: узкое окно (как было) + «у порога» low_score при малом зазоре 1–2 места.
-RERANK_TOP_MIN = float(os.getenv("RERANK_TOP_MIN", "0.20"))
-RERANK_TOP_MAX = float(os.getenv("RERANK_TOP_MAX", "0.62"))
-RERANK_GAP_MAX = float(os.getenv("RERANK_GAP_MAX", "0.05"))
-RERANK_NEAR_LOW_TOP_MAX = float(os.getenv("RERANK_NEAR_LOW_TOP_MAX", "0.36"))
-RERANK_NEAR_LOW_GAP_MAX = float(os.getenv("RERANK_NEAR_LOW_GAP_MAX", "0.10"))
 
 # --- Ответ при низком score ---
 DEFAULT_CTA_TEXT = os.getenv("DEFAULT_CTA_TEXT", "Записаться на консультацию")

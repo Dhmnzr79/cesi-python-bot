@@ -12,7 +12,7 @@ import session as session_mod
 from config import ALIAS_STRONG_THRESHOLD, CONTACTS_RE, DEBUG_TOKEN, PORT, PRICE_LOOKUP_RE, PRICE_CONCERN_RE, DEFAULT_CLIENT_ID, resolve_client_id
 from lead_service import handle_lead
 from logging_setup import get_logger, make_request_context, log_json
-from chunk_responder import respond_from_chunk
+from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
 from llm import classify_intent
 from query_selector import select_catalog_content_route
@@ -642,6 +642,281 @@ def ask():
 
     except Exception as e:
         logger.exception("ask_failed", extra={"q": q, "err": str(e)})
+        return safe_jsonify(internal_error_response()), 200
+
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",  # отключает буферизацию в nginx
+}
+
+
+def _sse_service_reply(
+    payload: dict,
+    sid: str,
+    q: str,
+    *,
+    doc_id: str | None = None,
+    track_user: bool = True,
+):
+    """Обёртка _service_reply для SSE: один event ui + done."""
+    if track_user and q:
+        mem_add_user(sid, q)
+    answer = (payload.get("answer") or "").strip()
+    out = finalize_ask(payload, sid, q, doc_id=doc_id)
+    if answer:
+        mem_add_bot(sid, answer)
+
+    def _gen():
+        yield f"event: ui\ndata: {json.dumps(_sanitize(out), ensure_ascii=False)}\n\n"
+        yield "event: done\ndata: {}\n\n"
+
+    return app.response_class(_gen(), mimetype="text/event-stream", headers=_SSE_HEADERS)
+
+
+def _sse_chunk_response(
+    chunk: dict,
+    q: str,
+    sid: str,
+    client_id: str | None,
+    *,
+    llm_question: str | None = None,
+    log_event: str = "Answer generated",
+):
+    """Стриминговый ответ из чанка через SSE."""
+    return app.response_class(
+        respond_from_chunk_stream(
+            chunk=chunk,
+            q=q,
+            sid=sid,
+            client_id=client_id,
+            finalize_ask=finalize_ask,
+            logger=logger,
+            llm_question=llm_question,
+            log_event=log_event,
+        ),
+        mimetype="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+@app.post("/ask/stream")
+def ask_stream():
+    """Стриминговый вариант /ask. Протокол SSE:
+      event: text_delta  data: {"delta": "..."}   — токены ответа
+      event: ui          data: {полный payload}    — UI элементы после генерации
+      event: done        data: {}                  — конец стрима
+    Direct-ответы (цены, контакты, flow) отдают сразу один ui + done без text_delta.
+    """
+    q = ""
+    try:
+        data = request.get_json(force=True) or {}
+        client_id = resolve_client_id(data.get("client_id"))
+        if client_id is None:
+            return jsonify({"error": "unknown_client"}), 403
+
+        q = (data.get("q") or "").strip()
+        ref = (data.get("ref") or "").strip()
+        sid = sid_from_body(data)
+
+        if data.get("q") and data.get("q").strip().lower() in ("/reset", "/новая"):
+            mem_reset(sid)
+            return safe_jsonify(reset_session_response(sid))
+
+        st = mem_get(sid)
+
+        flow_result = handle_flows(
+            data=data,
+            st=st,
+            sid=sid,
+            q=q,
+            client_id=client_id,
+            txt=TXT,
+            service_payload=_service_payload,
+            get_last_content_ui_payload=_get_last_content_ui_payload_compat,
+            get_topic_state=get_topic_state,
+        )
+        if flow_result is not None:
+            redirect_ref = (flow_result.get("redirect_ref") or "").strip()
+            if redirect_ref:
+                ch = get_chunk_by_ref(redirect_ref, client_id=client_id)
+                if ch:
+                    return _sse_chunk_response(
+                        ch, q, sid, client_id,
+                        llm_question=q or f"Информация из {redirect_ref}",
+                        log_event="Answer generated from flow redirect_ref",
+                    )
+            return _sse_service_reply(
+                flow_result["payload"], sid, q, doc_id=flow_result.get("doc_id")
+            )
+
+        if ref:
+            ch = get_chunk_by_ref(ref, client_id=client_id)
+            if ch:
+                return _sse_chunk_response(
+                    ch, q, sid, client_id,
+                    llm_question=q or f"Информация из {ref}",
+                    log_event="Answer generated from ref",
+                )
+
+        if not q:
+            return _sse_service_reply(empty_question_response(), sid, q, track_user=False)
+
+        if _is_short_contextual(q, st):
+            current_doc_id = (st.get("current_doc_id") or "").strip()
+            if current_doc_id:
+                ch = get_chunk_by_ref(f"{current_doc_id}#korotko", client_id=client_id)
+                if ch:
+                    return _sse_chunk_response(
+                        ch, q, sid, client_id,
+                        log_event="Answer from short_contextual fallback",
+                    )
+
+        intent = classify_intent(q, client_id=client_id, sid=sid)
+
+        if intent == "contacts":
+            cands = retrieve(q, topk=4, client_id=client_id)
+            picked = pick_contacts_chunk(cands)
+            if picked:
+                return _sse_chunk_response(
+                    picked, q, sid, client_id,
+                    log_event="Answer generated from contacts intent",
+                )
+
+        if intent in ("price_lookup", "price_concern"):
+            price_route = select_price_service_route(
+                q, client_id=client_id, sid=sid, intent_override=intent,
+            )
+            if price_route.get("mode") == "clarify":
+                payload = build_price_clarify_payload(
+                    sid=sid,
+                    client_id=client_id,
+                    intent=str(price_route.get("intent") or "other"),
+                    fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                )
+                log_json(logger, "price_route", **(payload.get("meta") or {}))
+                return _sse_service_reply(payload, sid, q)
+            if price_route.get("mode") == "matched":
+                intent = str(price_route.get("intent") or "other")
+                service = price_route.get("service") or {}
+                service_id = str(price_route.get("matched_service_id") or "")
+                match_score = float(price_route.get("match_score") or 0.0)
+                route_source = str(price_route.get("route_source") or "catalog")
+                if intent == "price_concern":
+                    concern_ref = str(service.get("concern_ref") or "").strip()
+                    if concern_ref:
+                        ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+                        if ch:
+                            log_json(
+                                logger, "price_route",
+                                intent="price_concern",
+                                matched_service_id=service_id,
+                                match_score=round(match_score, 4),
+                                route_source="concern_ref",
+                                concern_ref=concern_ref,
+                                fallback_reason=None,
+                            )
+                            return _sse_chunk_response(
+                                ch, q, sid, client_id,
+                                log_event="Answer generated from concern_ref",
+                            )
+                    payload = build_price_concern_payload(
+                        sid=sid, client_id=client_id,
+                        service_id=service_id, service=service, match_score=match_score,
+                    )
+                    log_json(logger, "price_route", **(payload.get("meta") or {}))
+                    return _sse_service_reply(payload, sid, q)
+                if route_source == "price_ref" and price_route.get("price_ref"):
+                    ref = str(price_route.get("price_ref") or "").strip()
+                    ch = get_chunk_by_ref(ref, client_id=client_id)
+                    if ch:
+                        log_json(
+                            logger, "price_route",
+                            intent="price_lookup",
+                            matched_service_id=service_id,
+                            match_score=round(match_score, 4),
+                            route_source="price_ref",
+                            price_key=price_route.get("price_key"),
+                            price_ref=ref,
+                            fallback_reason=None,
+                        )
+                        return _sse_chunk_response(
+                            ch, q, sid, client_id,
+                            llm_question=q or f"Цена по {ref}",
+                            log_event="Answer generated from price_ref",
+                        )
+                payload = build_price_lookup_payload(
+                    sid=sid, client_id=client_id,
+                    service_id=service_id, service=service, match_score=match_score,
+                    route_source=route_source,
+                    price_key=price_route.get("price_key"),
+                    price_ref=price_route.get("price_ref"),
+                    price_item=price_route.get("price_item"),
+                )
+                log_json(logger, "price_route", **(payload.get("meta") or {}))
+                return _sse_service_reply(payload, sid, q)
+
+        if intent == "content":
+            cat = select_catalog_content_route(q, client_id=client_id)
+            if cat.get("mode") == "facts":
+                svc = cat.get("service") or {}
+                sid_svc = str(cat.get("matched_service_id") or "")
+                payload = build_service_facts_card_payload(
+                    sid=sid, client_id=client_id,
+                    service_id=sid_svc, service=svc,
+                    match_score=float(cat.get("match_score") or 0.0),
+                    user_question=q,
+                )
+                log_json(logger, "catalog_route", route="facts",
+                         matched_service_id=sid_svc, match_score=cat.get("match_score"))
+                if sid_svc:
+                    set_last_catalog_service(sid, sid_svc)
+                return _sse_service_reply(payload, sid, q, doc_id=None)
+
+        log_json(logger, "Processing question", question=q[:100], question_length=len(q))
+        selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
+        mode = selection.get("mode")
+        dmeta = selection.get("debug_meta") or {}
+        if mode == "no_candidates":
+            log_json(logger, "No candidates found", question=q[:50])
+            return _sse_service_reply(no_candidates_response(), sid, q)
+        if mode == "low_score":
+            log_json(logger, "low_score_fallback", **dmeta)
+            st_ls = mem_get(sid)
+            pls = low_score_response(sid, client_id)
+            pls = _apply_response_policy_compat(
+                pls, st_ls, q,
+                topic_state={}, doc_meta={},
+                pre_doc_turn_count=None,
+                session_id=sid, client_id=client_id,
+            )
+            return _sse_service_reply(pls, sid, q)
+        if mode == "chunk":
+            final_chunk = selection.get("chunk")
+            if not isinstance(final_chunk, dict):
+                log_json(logger, "selection_invalid_chunk", debug_meta=dmeta)
+                return _sse_service_reply(no_candidates_response(), sid, q)
+            if dmeta.get("selected_by") == "alias":
+                log_json(
+                    logger, "alias_hit_selected",
+                    alias_score=dmeta.get("alias_score"),
+                    file=final_chunk.get("file"),
+                    h2_id=final_chunk.get("h2_id"),
+                    h3_id=final_chunk.get("h3_id"),
+                )
+            _log_selection(
+                q=q,
+                chosen_chunk=final_chunk,
+                chosen_score=final_chunk.get("_score"),
+                original_top_score=dmeta.get("top_score"),
+                rerank_applied=bool(selection.get("rerank_applied")),
+            )
+            return _sse_chunk_response(final_chunk, q, sid, client_id)
+        log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
+        return _sse_service_reply(no_candidates_response(), sid, q)
+
+    except Exception as e:
+        logger.exception("ask_stream_failed", extra={"q": q, "err": str(e)})
         return safe_jsonify(internal_error_response()), 200
 
 

@@ -1,204 +1,221 @@
-# Bot Architecture v4 — demo production (single-client)
+# Bot Architecture v4 — текущее состояние
 
-Документ фиксирует текущее состояние бота после hardening под быстрый demo-prod запуск для одного клиента.
-Фокус: стабильный `/ask`, безопасный `/lead`, предсказуемый UX, минимум операционных рисков.
+Документ описывает актуальную архитектуру после серии hardening-итераций перед demo-prod запуском.
 
 ---
 
 ## 1) Цель версии
 
-- Запуск demo-версии для одного клиента без тяжелых платформенных задач (CRM/n8n/multitenant/admin).
-- Закрытие критичных дыр перед продом: debug-доступ, lead-delivery, единая валидация телефона, fail-soft LLM, PII в логах.
-- Сохранение текущей продуктовой логики CTA/video/situation/followup.
+- Запуск demo-версии для одного клиента без платформенных задач (CRM/n8n/multitenant/admin).
+- Точный, предсказуемый routing: LLM-классификатор вместо разрозненных regex-веток.
+- Стабильный `/ask`, безопасный `/lead`, минимум операционных рисков.
 
 ---
 
 ## 2) Основные роуты
 
 ### `POST /ask`
-- Основной контентный и сценарный endpoint.
-- Валидация `client_id` через `resolve_client_id`.
-- Ветки:
-  - flow-handlers (lead/situation/back/yes),
-  - ref-routing,
-  - retrieval + chunk response.
+Основной контентный и сценарный endpoint. Полный пайплайн описан в разделе 5.
 
 ### `POST /lead`
-- Валидация JSON (`400 bad_json`).
-- Валидация `client_id` как в `/ask` (`403 unknown_client`).
-- Возврат унифицированного технического контракта:
-  - `ok: bool`
-  - `error_code: str | null`
-  - `delivery: "email" | "file_fallback" | null`
+- Валидация JSON и `client_id`.
+- Единый технический контракт ответа: `ok`, `error_code`, `delivery`.
 
 ### Debug роуты
-- `/_debug/ping`
-- `/__debug/retrieval`
-
-Поведение:
-- при `APP_ENV=prod` -> `404`
-- вне `prod` -> обязательный `X-Debug-Token`
+- `/_debug/ping`, `/__debug/retrieval`
+- При `APP_ENV=prod` → `404`, иначе требуют `X-Debug-Token`.
 
 ---
 
-## 3) Модули и ответственность (as-built)
+## 3) Модули и ответственность
 
 ### `app.py`
-- HTTP-граница, валидация `client_id`, маршрутизация, финализация ответа.
-- Debug-роуты с prod-блокировкой.
-- `/lead` интегрирован с единым lead-контрактом.
-
-### `query_selector.py`
-- Выбор чанка: dual retrieval, merge, alias assist, low-score guard, selective rerank.
-
-### `retriever.py`
-- Semantic retrieval + alias channels (raw/lemma/trigram).
-- Alias optimization: индекс alias-термов при загрузке корпуса + fallback на полный перебор.
-- `llm_rerank`:
-  - JSON-only контракт `{"choice": 1}`,
-  - строгая валидация,
-  - fallback на top-1 с `fallback_reason`.
+HTTP-граница, валидация `client_id`, маршрутизация по intent, финализация ответа.
 
 ### `llm.py`
-- Query rewrite для retrieval (JSON mode + валидация).
-- Генерация ответа (JSON mode).
-- Timeout + fail-soft fallback для answer generation и rewrite.
+- `classify_intent(q)` — LLM-классификатор намерения: `contacts / price_lookup / price_concern / content`. Fallback → `content`.
+- `rewrite_query_for_retrieval()` — переформулировка вопроса для семантического поиска (анафора, контекст диалога). Модель: `gpt-5.4-nano`, без temperature.
+- `generate_answer_with_empathy()` — генерация ответа из чанка с учётом эмпатии. Модель: `gpt-5.4-mini`.
+- `classify_booking_intent()` — бинарный классификатор намерения записаться. Модель: `gpt-5.4-nano`.
+
+### `query_selector.py`
+- `select_chunk_for_question()` — основной retrieval: dual-query merge → alias assist → reranker → возврат чанка.
+- `select_price_service_route()` — ценовой routing: матч услуги из каталога/сессии + intent_override.
+- `select_catalog_content_route()` — facts-карточка для услуг без MD-страницы (КТ, отбеливание).
+
+### `retriever.py`
+- Semantic retrieval + три alias-канала (raw / lemma / trigram).
+- `llm_rerank(q, cands)` — LLM выбирает лучший чанк из топ-3. Модель: `gpt-5.4-mini`.
+- `get_chunk_by_ref(ref)` — поиск чанка по `filename.md#anchor`. Принимает оба формата: с `.md` и без.
 
 ### `policy.py`
-- Детерминированное управление UI-элементами: followups, refs, video, situation, CTA.
-- Порог CTA на уровне темы через `cta_from_turn` (frontmatter).
+Детерминированное управление UI-элементами: followups, refs, video, situation, CTA. Порог CTA через `cta_from_turn` в frontmatter.
 
 ### `flow_handlers.py`
-- Сценарные ветки lead/situation.
-- Правило `yes` после followup:
-  - 1 кнопка -> redirect по `ref`,
-  - 2+ кнопки -> уточнение выбора, без автопрыжка в первую.
-
-### `session.py`
-- SQLite session state.
-- Единая нормализация телефона `normalize_phone()` в формат `+7XXXXXXXXXX`.
-- `extract_phone()` использует `normalize_phone()`.
-
-### `lead_service.py`
-- Основная доставка лида: email.
-- При ошибке email: file fallback (`leads/*.json`) + лог техпричины.
-- Возврат минимального результата (`ok/error_code/delivery`).
-
-### `logging_setup.py`
-- JSONL логирование.
-- Санитизация секретов + маскирование PII:
-  - phone/tel поля маскируются,
-  - `situation*` подрезаются.
-
-### `meta_loader.py`
-- Загрузка frontmatter.
-- Поддержка `cta_from_turn` (дефолт `0`).
+Сценарные ветки: lead, situation, back, yes. Booking-intent перехватывается здесь — до `classify_intent`.
 
 ### `chunk_responder.py`
-- Контентный пайплайн: chunk -> LLM -> UX payload -> policy -> session side-effects.
+Контентный пайплайн: chunk → LLM answer → policy → session side-effects → JSON.
 
-### `static/debug/ask-inspector.html` (dev)
-- Отдельная страница: сырой JSON ответа `/ask`, раздельно `quick_replies` и `meta.followups`, CTA/ситуация/видео, блок `GET /__debug/retrieval` (с `X-Debug-Token`).
-- Не входит в UI виджета; папку `static/debug/` можно удалить целиком.
+### `session.py`
+SQLite session state. Хранит `current_doc_id`, `last_catalog_service_id`, историю диалога, topic state.
+
+### `meta_loader.py`
+Загрузка frontmatter MD-файлов. `doc_id` — имя файла без `.md` если не задан явно.
+
+### `lead_service.py`
+Email-доставка лида. При ошибке — file fallback (`leads/*.json`).
+
+### `logging_setup.py`
+JSONL-логирование. Маскирование PII (phone), санитизация секретов.
 
 ---
 
-## 4) Контент и frontmatter
+## 4) Контент: MD-файлы и service_catalog.json
 
-Источники: `md/*.md`.
-
-Ключевые поля frontmatter, реально используемые сейчас:
-- `doc_id`, `doc_type`, `topic`, `subtopic`
-- `aliases`
-- `suggest_h3`, `suggest_refs`
+### MD-файлы (`md/*.md`)
+Ключевые поля frontmatter:
+- `doc_id`, `topic`, `subtopic`
+- `aliases` — фразы для alias-retrieval (три канала: raw/lemma/trigram)
+- `suggest_h3`, `suggest_refs` — followup-ссылки
 - `cta_text`, `cta_action`, `cta_from_turn`
-- `situation_allowed`
-- `video_key`
-- `empathy_enabled`, `empathy_tag`
+- `empathy_enabled`, `situation_allowed`, `video_key`
 
-Примечание:
-- `situation_note` не прокидывается в retrieval/LLM (осознанно), используется в lead-контуре.
+Формат H3-якорей для suggest: `### Заголовок {#anchor-id}`, для alias внутри раздела: `<!-- aliases: [...] -->`.
 
----
+### `clients/default/service_catalog.json`
+Каталог услуг. Ключевые поля:
+- `aliases` — фразы для матча услуги в ценовом routing
+- `md_entry_ref` — ссылка на MD-страницу (null = facts-карточка)
+- `price_key` — ключ в `prices.json`
+- `concern_ref` — ref в формате `filename.md#anchor` для routing `price_concern` → content-чанк с объяснением стоимости
+- `response_mode: "card"` — принудительная facts-карточка
 
-## 5) `/ask` — рабочий пайплайн
-
-1. Принять запрос и валидировать `client_id`.
-2. Обработать flow-ветки (lead/situation/back/yes/followup redirect).
-3. Если есть `ref` -> ответ из конкретного чанка.
-4. Иначе:
-   - select chunk (`query_selector`),
-   - low-score fallback при необходимости,
-   - контентный ответ через `respond_from_chunk`.
-5. `respond_from_chunk`:
-   - LLM answer (fail-soft),
-   - policy,
-   - session side-effects,
-   - унифицированный JSON.
+### Формат ref
+Везде используется формат `filename.md#anchor` (например, `implantation__faq__cost.md#korotko`).
+`get_chunk_by_ref` принимает оба варианта — с `.md` и без, добавляет расширение автоматически.
 
 ---
 
-## 6) Policy: followup/video/situation/CTA
+## 5) `/ask` — пайплайн
 
-- При наличии `video_key` в первом content-turn followup-слоты сжимаются (часто по одному за шаг).
-- `quick_replies` refs показываются ограниченно (не более 1 в выдаче).
-- CTA показывается по порогу `cta_from_turn` для конкретного документа.
-- CTA скрывается при активном lead/situation pending и при явном booking-intent.
+```
+Запрос
+  ↓
+Валидация client_id
+  ↓
+handle_flows() — booking / lead / situation / back / yes / followup-redirect
+  ↓ (если не перехвачено)
+ref из тела запроса → get_chunk_by_ref → respond_from_chunk
+  ↓ (если нет ref)
+_is_short_contextual? → get_chunk_by_ref(current_doc_id#korotko) → respond_from_chunk
+  ↓ (если не короткая реплика)
+classify_intent(q) → contacts | price_lookup | price_concern | content
+  ↓
+contacts    → retrieve(topk=4) + pick_contacts_chunk → respond_from_chunk
+             (fallback: продолжить в retrieval если chunk не найден)
 
----
+price_lookup/
+price_concern → select_price_service_route(intent_override=intent)
+               ├── price_concern + concern_ref → get_chunk_by_ref → respond_from_chunk
+               ├── price_concern без concern_ref → build_price_concern_payload
+               ├── price_lookup + prices_json → build_price_lookup_payload
+               └── no match → build_price_clarify_payload
 
-## 7) Lead контур (demo-safe)
-
-Единый результат `handle_lead()`:
-- `ok=true, delivery="email"`: email доставлен.
-- `ok=true, delivery="file_fallback"`: email не сработал, fallback сохранен.
-- `ok=false, delivery=null`: лид не обработан.
-
-Технические коды (`error_code`) используются для логов/дебага, не как пользовательский текст.
-
----
-
-## 8) Runtime и deploy правила
-
-### Single-worker правило
-- SQLite session storage -> запуск только 1 воркер.
-- Production entrypoint:
-  - `gunicorn -w 1 -b 0.0.0.0:8000 app:app`
-- Зафиксировано в:
-  - `Dockerfile`
-  - `start.sh`
-
-### Что обязательно в окружении
-- `OPENAI_API_KEY`
-- SMTP переменные для лидов (`LEAD_SMTP_HOST`, `LEAD_SMTP_PORT`, `LEAD_EMAIL_FROM`, `LEAD_EMAIL_TO`, и при необходимости auth)
-- `APP_ENV=prod` для блокировки debug-роутов
-- `DEBUG_TOKEN` для непроизводственных сред
-
----
-
-## 9) Безопасность и observability
-
-- Debug endpoints закрыты в `prod`.
-- `client_id` валидируется и в `/ask`, и в `/lead`.
-- Логи структурированы (JSONL), чувствительные поля маскируются.
-- LLM-сбой не роняет ответ пользователю (fail-soft fallback).
+content     → select_catalog_content_route
+             ├── facts (md_entry_ref=null) → build_service_facts_card_payload
+             └── no match → select_chunk_for_question (retrieval)
+  ↓
+select_chunk_for_question
+  ├── dual retrieval (primary + rewrite query) → merge → topk=8
+  ├── prefer_overview_if_broad
+  ├── low_score guard (< 0.33)
+  │   └── soft_alias_assist если alias_score >= 0.72
+  ├── contacts/prices детерминированный pick
+  └── reranker: top_score ∈ [0.33, 0.75) AND score_gap < 0.15
+      └── llm_rerank(top-3) → выбор лучшего чанка
+  ↓
+respond_from_chunk → LLM answer → policy → session → JSON
+```
 
 ---
 
-## 10) Что намеренно не делаем в этой версии
+## 6) Retrieval и reranker
 
-- CRM/n8n/webhook orchestration
-- Полная multitenant-изоляция
+### Dual retrieval
+Два запроса: исходный (`q`) и переформулированный (`q_rewrite`). Результаты мержатся, дедупликация по `(file, h2_id, h3_id)`.
+
+### Alias-каналы
+Три канала параллельно: raw (точное совпадение), lemma (лемматизация), trigram (нечёткое). Alias soft assist: если top_score < LOW_SCORE_THRESHOLD, но alias_score >= 0.72 — возвращает alias-чанк вместо low_score fallback.
+
+### Reranker (always-on с gap-guard)
+Включается когда:
+- `top_score >= 0.33` (выше low_score порога)
+- `top_score < 0.75` (не очевидный победитель)
+- `score_gap < 0.15` (разрыв между #1 и #2 мал — есть неопределённость)
+- не literal-point query
+
+Модель: `gpt-5.4-mini`. Выбирает из топ-3 кандидатов.
+
+---
+
+## 7) Intent routing
+
+`classify_intent()` вызывается после flow_handlers и _is_short_contextual. Booking обрабатывается раньше в flow_handlers — в classify_intent не попадает.
+
+| Intent | Условие | Действие |
+|--------|---------|----------|
+| `contacts` | адрес, телефон, график | pick_contacts_chunk из retrieve(topk=4) |
+| `price_lookup` | сколько стоит, цена | select_price_service_route → цена из prices.json |
+| `price_concern` | дорого, не потяну | concern_ref → cost.md чанк, иначе generic payload |
+| `content` | всё остальное | select_catalog_content_route или retrieval |
+
+---
+
+## 8) Модели
+
+| Задача | Модель |
+|--------|--------|
+| Эмбеддинги | `text-embedding-3-large` |
+| Генерация ответа | `gpt-5.4-mini` |
+| Reranker | `gpt-5.4-mini` |
+| Intent classifier | `gpt-5.4-mini` |
+| Query rewrite | `gpt-5.4-nano` |
+| Booking classifier | `gpt-5.4-nano` |
+| Lead name classify | `gpt-5.4-mini` |
+
+---
+
+## 9) Session state
+
+Ключевые поля в SQLite:
+- `current_doc_id` — doc_id последнего отвеченного чанка (имя файла без `.md`)
+- `last_catalog_service_id` — последняя услуга из каталога
+- `hist` — история диалога (последние N реплик для rewrite)
+- `topic_state[doc_id]` — doc_turn_count, covered_h3_ids, cta_shown, video_shown
+
+---
+
+## 10) Lead контур
+
+`handle_lead()` возвращает:
+- `ok=true, delivery="email"` — доставлено
+- `ok=true, delivery="file_fallback"` — email упал, сохранено в `leads/*.json`
+- `ok=false, delivery=null` — не обработано
+
+---
+
+## 11) Runtime
+
+- **Single-worker**: SQLite → только 1 воркер gunicorn
+- **Entrypoint**: `gunicorn -w 1 -b 0.0.0.0:8000 app:app`
+- **Обязательные env**: `OPENAI_API_KEY`, SMTP-переменные, `APP_ENV=prod`
+
+---
+
+## 12) Что намеренно не делаем в v1.0
+
+- CRM / n8n / webhook интеграции
+- Полная multitenant-изоляция (один клиент `default`)
 - Большой рефакторинг `app.py`
-- Передача `situation_note` в LLM
-
-Это оставлено на следующий этап после demo-запуска.
-
----
-
-## 11) Краткий итог
-
-Текущая v4 архитектура — это рабочий RAG + сценарный backend, адаптированный под быстрый прод-демо запуск:
-- точность: dual retrieval + alias + selective rerank + low-score guard;
-- UX: детерминированная policy, корректная обработка коротких `yes`;
-- эксплуатация: safe debug policy, lead email+fallback, single-worker runtime, PII-aware logging.
+- Стриминг на бэкенде

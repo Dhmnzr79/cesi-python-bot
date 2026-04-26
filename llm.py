@@ -21,7 +21,6 @@ from config import (
     QUERY_REWRITE_ON,
     QUERY_REWRITE_VALIDATE_OVERLAP,
     REWRITE_REJECT_SUBSTRINGS,
-    TRIGGERS_COMPILED,
 )
 from logging_setup import get_logger, log_json
 from session import (
@@ -244,50 +243,20 @@ JSON_ANSWER_RULE = (
 )
 
 
-def _norm(text: str) -> str:
-    return (text or "").lower().replace("ё", "е").strip()
-
-
 def _doc_key(md_file: str, meta: dict) -> str:
     return meta.get("doc_id") or md_file
 
 
-def _is_emotional(user_q: str, empathy_tag: str | None) -> bool:
-    q = _norm(user_q)
-    if empathy_tag and empathy_tag in TRIGGERS_COMPILED:
-        if TRIGGERS_COMPILED[empathy_tag].search(q):
-            return True
-    for rx in TRIGGERS_COMPILED.values():
-        if rx.search(q):
-            return True
-    return False
-
-
-def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id: str):
+def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id: str, *, force_text: bool = False):
     doc_key = _doc_key(
         meta.get("md_file") or meta.get("source") or meta.get("title", ""),
         meta,
     )
     allow_empathy = bool(EMPATHY_ON and meta.get("empathy_enabled"))
     first_in_topic = is_first_in_topic(session_id, doc_key)
-    emotional = _is_emotional(user_q, meta.get("empathy_tag"))
-
-    use_empathy = bool(allow_empathy and (first_in_topic or emotional))
+    use_empathy = bool(allow_empathy and first_in_topic)
     system_prompt = BASE_SYSTEM + (EMPATHY_ADDON if use_empathy else "")
-    if meta.get("verbatim"):
-        system_prompt += (
-            " Используй только точные формулировки из предоставленного контента, "
-            "не перефразируй."
-        )
-    pref_fmt = meta.get("preferred_format") or []
-    if isinstance(pref_fmt, str):
-        pref_fmt = [pref_fmt]
-    pref_fmt = [str(x).strip().lower() for x in pref_fmt if str(x).strip()]
-    if "bullets" in pref_fmt:
-        system_prompt += " Структурируй ответ в виде коротких пунктов."
-    elif "paragraph" in pref_fmt:
-        system_prompt += " Отвечай связным текстом без списков."
-    if CHAT_JSON_MODE:
+    if CHAT_JSON_MODE and not force_text:
         system_prompt += JSON_ANSWER_RULE
 
     messages = [
@@ -305,7 +274,6 @@ def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id:
 
     meta["_empathy_used"] = use_empathy
     meta["_first_in_topic"] = first_in_topic
-    meta["_emotional_detected"] = emotional
     meta["_doc_key"] = doc_key
 
     return messages, use_empathy, doc_key
@@ -364,6 +332,61 @@ def generate_answer_with_empathy(
     update_topic_empathy(session_id, doc_key, use_empathy)
 
     return answer, profile
+
+
+def generate_answer_stream(user_q: str, context_md: str, meta: dict, session_id: str):
+    """Generator для стриминга ответа.
+
+    Yields:
+        ("delta", str)            — очередной токен ответа
+        ("done", (str, dict))     — финальный накопленный текст + profile
+    """
+    mem_txt, profile = mem_context(session_id)
+    messages, use_empathy, doc_key = build_messages_for_gpt(
+        user_q, context_md, meta, session_id, force_text=True
+    )
+    if mem_txt and MEMORY_ON:
+        for msg in messages:
+            if msg["role"] == "user":
+                msg["content"] = f"{mem_txt}\n\n" + msg["content"]
+                break
+
+    full_text = ""
+    try:
+        stream = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            stream=True,
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+        )
+        for chunk in stream:
+            if chunk.choices:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    full_text += delta
+                    yield ("delta", delta)
+        if not full_text.strip():
+            full_text = LLM_FALLBACK_ANSWER
+        log_json(
+            logger,
+            "llm_generate_stream",
+            sid=session_id,
+            model_used=CHAT_MODEL,
+            empathy_used=bool(use_empathy),
+        )
+    except Exception as e:
+        log_json(
+            logger,
+            "llm_generate_stream_failed",
+            sid=session_id,
+            model_used=CHAT_MODEL,
+            err=str(e)[:300],
+        )
+        if not full_text.strip():
+            full_text = LLM_FALLBACK_ANSWER
+
+    update_topic_empathy(session_id, doc_key, use_empathy)
+    yield ("done", (full_text, profile))
 
 
 _NAME_CLASSIFY_SYSTEM = (

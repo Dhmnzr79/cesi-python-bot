@@ -93,8 +93,6 @@ def main():
                 "topic": meta.get("topic"),
                 "doc_type": meta.get("doc_type"),
                 "subtype": meta.get("subtype"),
-                "verbatim": bool(meta.get("verbatim", False)),
-                "preferred_format": meta.get("preferred_format", []),
                 "cta_action": meta.get("cta_action"),
                 "cta_text": meta.get("cta_text"),
                 "empathy_enabled": bool(meta.get("empathy_enabled", False)),

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import inspect
+import json as _json
 import os
 from typing import Any, Callable
 
 import session as session_mod
-from llm import generate_answer_with_empathy
+from llm import LLM_FALLBACK_ANSWER, generate_answer_stream, generate_answer_with_empathy
 from logging_setup import log_json
 from meta_loader import get_doc_meta
 from policy import apply_response_policy
@@ -216,3 +217,135 @@ def respond_from_chunk(
         answer_length=len(answer),
     )
     return safe_jsonify(finalize_ask(payload, sid, q, doc_id=doc_id))
+
+
+def respond_from_chunk_stream(
+    *,
+    chunk: dict,
+    q: str,
+    sid: str,
+    client_id: str | None,
+    finalize_ask: Callable[..., dict],
+    logger,
+    llm_question: str | None = None,
+    log_event: str = "Answer generated",
+):
+    """Generator yielding SSE strings: text_delta → ui → done.
+
+    Используй с Flask: Response(respond_from_chunk_stream(...), mimetype='text/event-stream')
+    Полностью зеркалит respond_from_chunk, но стримит токены ответа.
+    """
+    meta = meta_for_chunk(chunk, client_id=client_id)
+    doc_id = meta.get("doc_id")
+    if doc_id:
+        set_current_doc(sid, doc_id)
+
+    full_text = ""
+    profile: dict = {}
+
+    try:
+        for event_type, value in generate_answer_stream(
+            llm_question or q, chunk_context_md_for_llm(chunk), meta, sid
+        ):
+            if event_type == "delta":
+                full_text += value
+                yield f"event: text_delta\ndata: {_json.dumps({'delta': value}, ensure_ascii=False)}\n\n"
+            elif event_type == "done":
+                full_text, profile = value
+    except Exception as e:
+        log_json(logger, "stream_chunk_failed", sid=sid, err=str(e)[:300])
+        if not full_text.strip():
+            full_text = LLM_FALLBACK_ANSWER
+
+    answer = ensure_answer(full_text, chunk)
+
+    # Все session side-effects — идентично respond_from_chunk
+    st = mem_get(sid)
+    lead_flow_active = is_active_lead_flow(st)
+    pre_turn = _increment_doc_turn_with_pre(
+        sid,
+        doc_id,
+        contentful=bool(answer.strip()),
+        is_low_score=False,
+        is_error=False,
+        lead_flow_active=lead_flow_active,
+    )
+    tstate = get_topic_state(sid, doc_id) if doc_id else {}
+    suggest_h3 = set(meta.get("suggest_h3") or [])
+    h3_id = chunk.get("h3_id")
+    if h3_id and h3_id in suggest_h3:
+        mark_h3_covered(sid, doc_id, h3_id)
+        tstate = get_topic_state(sid, doc_id)
+
+    payload = build_ask_response(
+        answer=answer,
+        top=chunk,
+        meta=meta,
+        sid=sid,
+        profile=profile,
+        client_id=client_id,
+        topic_state=tstate,
+    )
+    payload = _apply_response_policy_compat(
+        payload,
+        st,
+        q,
+        topic_state=tstate,
+        doc_meta=meta,
+        pre_doc_turn_count=pre_turn,
+        session_id=sid,
+        client_id=client_id,
+    )
+    refs_before_ui = list(payload.get("quick_replies") or [])
+    payload = normalize_policy_payload(payload)
+    pdec = (payload.get("meta") or {}).get("policy_decision") or {}
+    ui_dropped = set((payload.get("meta") or {}).get("ui_dropped") or [])
+
+    if doc_id:
+        if bool(pdec.get("show_video")):
+            mark_video_shown(sid, doc_id)
+        elif meta.get("video_key") and not bool(get_topic_state(sid, doc_id).get("video_shown")):
+            mark_video_pending(sid, doc_id, pending=True)
+        sit = payload.get("situation") or {}
+        if sit.get("show") and sit.get("mode") == "normal":
+            mark_situation_offered(sid, doc_id)
+        if bool(pdec.get("defer_refs")):
+            defer_refs(sid, doc_id, pdec.get("refs_to_defer") or [])
+        elif "refs_with_two_followups_conflict" in ui_dropped and refs_before_ui:
+            defer_refs(sid, doc_id, refs_before_ui[:1])
+        elif payload.get("quick_replies"):
+            _mark_suggest_ref_used_compat(sid, doc_id, True)
+            tstate_after = get_topic_state(sid, doc_id)
+            if tstate_after.get("refs_deferred"):
+                pop_deferred_ref(sid, doc_id)
+
+    if payload.get("cta") and doc_id:
+        set_cta_shown(sid, doc_id, shown=True)
+
+    log_json(
+        logger,
+        log_event,
+        file=chunk.get("file"),
+        score=round(float(chunk.get("_score", 0.0)), 3),
+        answer_length=len(answer),
+    )
+    final = finalize_ask(payload, sid, q, doc_id=doc_id)
+    yield f"event: ui\ndata: {_json.dumps(final, ensure_ascii=False, default=_sse_default)}\n\n"
+    yield "event: done\ndata: {}\n\n"
+
+
+def _sse_default(obj):
+    """JSON default для SSE — обрабатывает numpy типы из retrieval."""
+    try:
+        import numpy as np
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except ImportError:
+        pass
+    if isinstance(obj, set):
+        return list(obj)
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
