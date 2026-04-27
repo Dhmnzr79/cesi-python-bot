@@ -1,4 +1,5 @@
 """Детерминированные правила до/после LLM; намерение записи — regex + при необходимости LLM."""
+import os
 from config import BOOKING_INTENT_LLM_ON, BOOKING_INTENT_RE, CONTACTS_RE, PRICES_RE
 from llm import classify_booking_wants_appointment
 from retriever import chunk_doc_type
@@ -32,6 +33,10 @@ def pick_contacts_chunk(cands: list) -> dict | None:
     for ch in cands:
         dt = (chunk_doc_type(ch) or "").strip().lower()
         if dt == "contacts":
+            return ch
+        # Fallback: filename contains "contacts" (если doc_type не прописан во front-matter)
+        file_base = os.path.basename((ch.get("file") or "") if isinstance(ch, dict) else "").lower()
+        if "contacts" in file_base:
             return ch
     return None
 

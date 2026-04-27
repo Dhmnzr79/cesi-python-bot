@@ -36,7 +36,7 @@ HTTP-граница, валидация `client_id`, маршрутизация 
 - `classify_intent(q)` — LLM-классификатор намерения: `contacts / price_lookup / price_concern / content`. Fallback → `content`.
 - `rewrite_query_for_retrieval()` — переформулировка вопроса для семантического поиска (анафора, контекст диалога). Модель: `gpt-5.4-nano`, без temperature.
 - `generate_answer_with_empathy()` — генерация ответа из чанка с учётом эмпатии. Модель: `gpt-5.4-mini`.
-- `classify_booking_intent()` — бинарный классификатор намерения записаться. Модель: `gpt-5.4-nano`.
+- `classify_booking_wants_appointment()` — бинарный классификатор намерения записаться. Модель: `BOOKING_INTENT_LLM_MODEL` (по умолчанию `gpt-5.4-nano`).
 
 ### `query_selector.py`
 - `select_chunk_for_question()` — основной retrieval: dual-query merge → alias assist → reranker → возврат чанка.

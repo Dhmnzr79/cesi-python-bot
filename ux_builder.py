@@ -222,7 +222,10 @@ def empty_question_response() -> dict:
 
 def no_candidates_response() -> dict:
     return {
-        "answer": "Пока не нашёл подходящий материал в базе. Сформулируйте вопрос иначе или выберите один из вариантов ниже.",
+        "answer": (
+            "Не нашла ответа на этот вопрос. Попробуйте спросить иначе — или запишитесь на консультацию, "
+            "там разберём."
+        ),
         "quick_replies": [],
         "cta": None,
         "video": None,
@@ -246,7 +249,7 @@ def reset_session_response(sid: str) -> dict:
 
 def internal_error_response() -> dict:
     return {
-        "answer": "Извините, не получилось ответить. Попробуйте переформулировать вопрос.",
+        "answer": "Что-то пошло не так. Попробуйте спросить ещё раз.",
         "quick_replies": [],
         "cta": None,
         "video": None,
@@ -268,7 +271,10 @@ def low_score_response(sid: str, client_id: str | None = None) -> dict:
     if client_id is not None:
         meta_out["client_id"] = client_id
     return {
-        "answer": "Не нашёл точного ответа на этот вопрос. Уточните или выберите тему.",
+        "answer": (
+            "Не нашла точного ответа. Запишитесь на консультацию, она у нас бесплатная, "
+            "цена фиксируется в договоре без скрытых доплат, возможен налоговый вычет 13%."
+        ),
         "quick_replies": [],
         "cta": default_cta_dict(),
         "video": None,
@@ -375,13 +381,14 @@ def build_price_lookup_payload(
             answer += f" Важно: {note.strip()}."
     else:
         answer = (
-            f"По услуге «{title}» сейчас не вижу точной цены в ценовом слое. "
-            "Могу уточнить формат услуги или передать запрос администратору."
+            f"«Точная стоимость «{title}» определяется после консультации — она у нас бесплатна. "
+            "Цена фиксируется в договоре до начала лечения, без скрытых доплат. "
+            "Возможен налоговый вычет 13%.»"
         )
-    # price_lookup: ответ «закрыт», без кнопок и без CTA (сценарий «человек думает»).
+    quick = _suggest_refs_at_most_one(service)
     return {
         "answer": answer,
-        "quick_replies": [],
+        "quick_replies": quick,
         "cta": None,
         "video": None,
         "situation": {"show": False, "mode": "normal"},
@@ -413,9 +420,8 @@ def build_price_concern_payload(
     quick = _suggest_refs_at_most_one(service)
     return {
         "answer": (
-            f"Понимаю сомнение по стоимости «{title}». "
-            "Цена зависит от клинической ситуации, объема работ и выбранного протокола. "
-            "На консультации можно подобрать вариант под ваш бюджет без лишних этапов."
+            f"Цена на «{title}» зависит от ситуации — объём работ у всех разный. "
+            "На консультации врач посмотрит и предложит варианты под ваш бюджет."
         ),
         "quick_replies": quick,
         "cta": default_cta_dict(),
@@ -445,7 +451,7 @@ def build_price_clarify_payload(
     fallback_reason: str,
 ) -> dict:
     return {
-        "answer": "Уточните, пожалуйста, какую именно услугу вы имеете в виду, и я отвечу точнее по цене.",
+        "answer": "Точной цены на эту услугу лучше уточнить у администратора. Записать вас на консультацию?",
         "quick_replies": [],
         "cta": None,
         "video": None,

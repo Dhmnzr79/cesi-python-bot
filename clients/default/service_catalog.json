@@ -19,12 +19,7 @@
     "price_key": "tomography",
     "price_ref": null,
     "price_display": "always",
-    "suggest_refs": [
-      {
-        "label": "Почему имплантация это не больно",
-        "ref": "implantation__faq__pain"
-      }
-    ]
+    "suggest_refs": []
   },
   "professional_whitening": {
     "title": "Профессиональное отбеливание",
@@ -48,7 +43,12 @@
     "price_key": "professional_whitening",
     "price_ref": null,
     "price_display": "always",
-    "suggest_refs": []
+    "suggest_refs": [
+      {
+        "label": "Условия оплаты",
+        "ref": "clinic__info__payment_terms.md#korotko"
+      }
+    ]
   },
   "all_on_6": {
     "title": "Имплантация All-on-6",
@@ -64,7 +64,7 @@
     "facts": [],
     "md_entry_ref": "implantation__service__all_on_6",
     "price_key": "all_on_6",
-    "price_ref": null,
+    "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
@@ -83,7 +83,7 @@
     "facts": [],
     "md_entry_ref": "implantation__service__all_on_4",
     "price_key": "all_on_4",
-    "price_ref": null,
+    "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
@@ -103,7 +103,7 @@
     "facts": [],
     "md_entry_ref": "implantation__service__classic",
     "price_key": "classic",
-    "price_ref": null,
+    "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
@@ -121,7 +121,7 @@
     "facts": [],
     "md_entry_ref": "implantation__service__one_stage",
     "price_key": "one_stage",
-    "price_ref": null,
+    "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
@@ -139,7 +139,7 @@
     "facts": [],
     "md_entry_ref": "implantation__service__temporary_teeth",
     "price_key": "temporary_teeth",
-    "price_ref": null,
+    "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
     "price_display": "always",
     "suggest_refs": []
@@ -197,7 +197,12 @@
     "price_key": "zirconia_crowns",
     "price_ref": null,
     "price_display": "always",
-    "suggest_refs": []
+    "suggest_refs": [
+      {
+        "label": "Условия оплаты",
+        "ref": "clinic__info__payment_terms.md#korotko"
+      }
+    ]
   },
   "teeth_treatment": {
     "title": "Лечение зубов",
@@ -216,6 +221,11 @@
     "price_key": "teeth_treatment",
     "price_ref": null,
     "price_display": "always",
-    "suggest_refs": []
+    "suggest_refs": [
+      {
+        "label": "Условия оплаты",
+        "ref": "clinic__info__payment_terms.md#korotko"
+      }
+    ]
   }
 }

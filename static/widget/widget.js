@@ -1,4 +1,4 @@
-﻿import { postAsk } from "./api.js";
+﻿import { postAsk, streamAsk } from "./api.js";
 
 const STORAGE_SID = "clinic_widget_sid";
 const DEFAULT_AVATAR_URL = "/static/avatar.png";
@@ -99,6 +99,48 @@ function dismissLinksAll(messages) {
   for (const m of messages) {
     if (m.role === "bot") m.linksDismissed = true;
   }
+}
+
+/**
+ * Создаёт «живую» bubble в feed перед typing-wrap и скрывает typing indicator.
+ * Вызывается лениво — только при первом text_delta.
+ * @param {HTMLElement} feed
+ * @param {string} resolvedAvatarUrl
+ * @returns {HTMLElement} row — корневой элемент bubble
+ */
+function _createLiveBubble(feed, resolvedAvatarUrl) {
+  const typingWrap = feed.querySelector(".clinic-shell__typing-wrap");
+  const row = document.createElement("div");
+  row.className = "clinic-row clinic-row--bot";
+  row.setAttribute("data-live-bubble", "");
+  const av = document.createElement("img");
+  av.className = "clinic-row__avatar";
+  av.src = resolvedAvatarUrl;
+  av.alt = "";
+  av.width = 32;
+  av.height = 32;
+  const bubble = document.createElement("div");
+  bubble.className = "clinic-msg clinic-msg--bot";
+  const body = document.createElement("div");
+  body.className = "clinic-msg__body";
+  bubble.appendChild(body);
+  row.appendChild(av);
+  row.appendChild(bubble);
+  feed.insertBefore(row, typingWrap);
+  if (typingWrap) typingWrap.classList.remove("is-visible");
+  return row;
+}
+
+/**
+ * Обновляет текст в живой bubble и скроллит вниз.
+ * @param {HTMLElement} row
+ * @param {string} text
+ * @param {HTMLElement} feed
+ */
+function _updateLiveBubble(row, text, feed) {
+  const body = row.querySelector(".clinic-msg__body");
+  if (body) body.textContent = text;
+  feed.scrollTop = feed.scrollHeight;
 }
 
 /**
@@ -500,20 +542,37 @@ export function mountWidget(root, config) {
     state.pending = true;
     renderFeed();
 
-    try {
-      const data = await postAsk(apiBase, body);
-      if (data.meta && data.meta.sid) setSid(data.meta.sid);
-      const turn = botTurnFromPayload(data);
-      if (turn && turn.text) state.messages.push(turn);
-      state.lastPayload = data;
-      if (!state.isOpen) state.unread = true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Ошибка сети");
-    } finally {
-      state.pending = false;
-      if (state.unread && !state.isOpen) unreadDot.classList.add("is-visible");
-      renderFeed();
-    }
+    let liveBubble = null;
+    let fullText = "";
+    let uiData = null;
+
+    await streamAsk(apiBase, body, {
+      onDelta(delta) {
+        fullText += delta;
+        if (!liveBubble) liveBubble = _createLiveBubble(feed, resolvedAvatarUrl);
+        _updateLiveBubble(liveBubble, fullText, feed);
+      },
+      onUi(data) {
+        uiData = data;
+      },
+      onDone() {
+        if (uiData) {
+          if (uiData.meta && uiData.meta.sid) setSid(uiData.meta.sid);
+          const turn = botTurnFromPayload(uiData);
+          if (turn && turn.text) state.messages.push(turn);
+          state.lastPayload = uiData;
+          if (!state.isOpen) state.unread = true;
+        }
+        state.pending = false;
+        if (state.unread && !state.isOpen) unreadDot.classList.add("is-visible");
+        renderFeed();
+      },
+      onError(msg) {
+        setError(msg);
+        state.pending = false;
+        renderFeed();
+      },
+    });
   }
 
   async function sendFromComposer() {
@@ -544,25 +603,39 @@ export function mountWidget(root, config) {
     state.pending = true;
     renderFeed();
 
-    try {
-      const data = await postAsk(apiBase, {
-        client_id: clientId,
-        sid,
-        q,
-      });
-      if (data.meta && data.meta.sid) setSid(data.meta.sid);
-      const turn = botTurnFromPayload(data);
-      if (turn && turn.text) state.messages.push(turn);
-      state.lastPayload = data;
-      if (!state.isOpen) state.unread = true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Ошибка сети");
-    } finally {
-      state.pending = false;
-      if (state.unread && !state.isOpen) unreadDot.classList.add("is-visible");
-      renderFeed();
-      syncSendState();
-    }
+    let liveBubble = null;
+    let fullText = "";
+    let uiData = null;
+
+    await streamAsk(apiBase, { client_id: clientId, sid, q }, {
+      onDelta(delta) {
+        fullText += delta;
+        if (!liveBubble) liveBubble = _createLiveBubble(feed, resolvedAvatarUrl);
+        _updateLiveBubble(liveBubble, fullText, feed);
+      },
+      onUi(data) {
+        uiData = data;
+      },
+      onDone() {
+        if (uiData) {
+          if (uiData.meta && uiData.meta.sid) setSid(uiData.meta.sid);
+          const turn = botTurnFromPayload(uiData);
+          if (turn && turn.text) state.messages.push(turn);
+          state.lastPayload = uiData;
+          if (!state.isOpen) state.unread = true;
+        }
+        state.pending = false;
+        if (state.unread && !state.isOpen) unreadDot.classList.add("is-visible");
+        renderFeed();
+        syncSendState();
+      },
+      onError(msg) {
+        setError(msg);
+        state.pending = false;
+        renderFeed();
+        syncSendState();
+      },
+    });
   }
 
   function isLeadPhoneStep() {

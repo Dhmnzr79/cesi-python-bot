@@ -1,5 +1,6 @@
 ---
 doc_id: clinic__info__contacts
+doc_type: contacts
 topic: clinic
 subtopic: contacts
 
