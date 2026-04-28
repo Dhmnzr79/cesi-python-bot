@@ -42,7 +42,7 @@
     "md_entry_ref": null,
     "price_key": "professional_whitening",
     "price_ref": null,
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": [
       {
         "label": "Условия оплаты",
@@ -66,7 +66,7 @@
     "price_key": "all_on_6",
     "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "all_on_4": {
@@ -85,7 +85,7 @@
     "price_key": "all_on_4",
     "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "classic": {
@@ -105,7 +105,7 @@
     "price_key": "classic",
     "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "one_stage": {
@@ -123,7 +123,7 @@
     "price_key": "one_stage",
     "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "temporary_teeth": {
@@ -141,7 +141,7 @@
     "price_key": "temporary_teeth",
     "price_ref": "implantation__pricing__implants.md#korotko",
     "concern_ref": "implantation__faq__cost.md#korotko",
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "aligners": {
@@ -160,7 +160,7 @@
     "md_entry_ref": "orthodontics__service__aligners",
     "price_key": "aligners",
     "price_ref": null,
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "veneers": {
@@ -178,7 +178,7 @@
     "md_entry_ref": "prosthetics__service__veneers",
     "price_key": "veneers",
     "price_ref": null,
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": []
   },
   "zirconia_crowns": {
@@ -196,7 +196,7 @@
     "md_entry_ref": "prosthetics__service__zirconia_crowns",
     "price_key": "zirconia_crowns",
     "price_ref": null,
-    "price_display": "always",
+    "price_display": "on_request",
     "suggest_refs": [
       {
         "label": "Условия оплаты",

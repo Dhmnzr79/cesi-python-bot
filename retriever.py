@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import threading
 from typing import Any
 
 import numpy as np
@@ -14,6 +15,8 @@ from config import (
     EMB_MODEL,
     ALIAS_STRONG_THRESHOLD,
     RERANK_MODEL,
+    RETRIEVE_CACHE_MAXSIZE,
+    RETRIEVE_CACHE_TTL_SEC,
 )
 from llm import client
 from logging_setup import get_logger, log_json
@@ -42,6 +45,8 @@ _SECTION_CACHE: dict[str, dict] = {}
 _EMB: np.ndarray | None = None
 _EMB_LOAD_ERROR: str | None = None
 _ALIAS_INDEX: dict[str, list[dict]] | None = None
+_RETRIEVE_CACHE_LOCK = threading.RLock()
+_RETRIEVE_CACHE: dict[tuple[str, int, str], tuple[float, list[dict]]] = {}
 
 
 def load_corpus_if_needed() -> list:
@@ -119,7 +124,7 @@ def get_chunk_by_ref(ref: str, *, client_id: str | None = None) -> dict | None:
 
 
 def _load_doc_text(md_path: str) -> str:
-    with open(md_path, "r", encoding="utf-8") as f:
+    with open(md_path, "r", encoding="utf-8-sig") as f:
         return f.read()
 
 
@@ -828,6 +833,24 @@ def retrieve(
             emb_path=EMB_PATH,
         )
         return []
+    cache_key = (q_embed, int(topk), str(client_id or ""))
+    now = time.time()
+    with _RETRIEVE_CACHE_LOCK:
+        cached = _RETRIEVE_CACHE.get(cache_key)
+        if cached and (now - float(cached[0]) <= RETRIEVE_CACHE_TTL_SEC):
+            out_cached = [dict(item) for item in (cached[1] or [])]
+            if not silent:
+                log_json(
+                    logger,
+                    "retrieval_cache_hit",
+                    used_query=q_embed[:500],
+                    query_raw=q_in[:500],
+                    query_normalized=(q_norm[:500] if q_norm else None),
+                    k=topk,
+                    client_id=client_id,
+                    size=len(out_cached),
+                )
+            return out_cached
     v = embed_q(q_embed)
     sims = emb @ v
     idx = np.argsort(-sims)[: max(topk, 8)]
@@ -864,6 +887,13 @@ def retrieve(
             chunks_used=chunks_used,
             top_score=(chunks_used[0]["score"] if chunks_used else None),
         )
+    with _RETRIEVE_CACHE_LOCK:
+        _RETRIEVE_CACHE[cache_key] = (now, [dict(item) for item in out])
+        if len(_RETRIEVE_CACHE) > max(32, int(RETRIEVE_CACHE_MAXSIZE)):
+            stale_keys = sorted(_RETRIEVE_CACHE.items(), key=lambda kv: kv[1][0])
+            drop_n = len(_RETRIEVE_CACHE) - int(RETRIEVE_CACHE_MAXSIZE)
+            for i in range(max(0, drop_n)):
+                _RETRIEVE_CACHE.pop(stale_keys[i][0], None)
 
     return out
 

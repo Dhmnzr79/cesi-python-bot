@@ -4,7 +4,6 @@ topic: implantation
 subtopic: classic
 
 aliases:
-  - "имплант"
   - "классическая имплантация"
   - "поставить имплант"
   - "вставить зуб"

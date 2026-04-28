@@ -11,6 +11,7 @@ from session import (
     extract_phone,
     get_lead_pending_name,
     is_active_lead_flow,
+    mark_booking_intent_ever,
     mem_get,
     parse_no,
     parse_yes,
@@ -288,6 +289,7 @@ def handle_flows(
         )
 
     if q and booking_intent(q, sid=sid, client_id=client_id) and not is_active_lead_flow(st):
+        mark_booking_intent_ever(sid)
         set_lead_intent(sid, "collecting_name")
         return {
             "payload": service_payload(
@@ -365,6 +367,7 @@ def handle_flows(
         }
 
     if data.get("cta_action") == "lead":
+        mark_booking_intent_ever(sid)
         set_lead_intent(sid, "collecting_name")
         return {
             "payload": service_payload(
@@ -404,6 +407,7 @@ def handle_flows(
         }
 
     if st.get("last_bot_action") == "offered_cta" and parse_yes(q):
+        mark_booking_intent_ever(sid)
         set_lead_intent(sid, "collecting_name")
         return {
             "payload": service_payload(

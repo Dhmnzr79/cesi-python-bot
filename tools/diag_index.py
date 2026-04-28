@@ -77,7 +77,7 @@ def scan_md(md_root: str):
             if f.endswith(".md"):
                 path = os.path.join(root, f)
                 try:
-                    with open(path, "r", encoding="utf-8") as fh:
+                    with open(path, "r", encoding="utf-8-sig") as fh:
                         yield (f, path, None, None, fh.read())
                 except Exception:
                     pass

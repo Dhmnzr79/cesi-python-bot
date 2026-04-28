@@ -1,4 +1,4 @@
-﻿---
+---
 doc_id: implantation__info__methods_overview
 topic: implantation
 subtopic: methods_overview

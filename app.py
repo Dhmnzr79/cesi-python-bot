@@ -4,17 +4,33 @@ import sys
 import time
 import inspect
 import json
+import threading
+from collections import deque
 import numpy as np
 
 from flask import Flask, jsonify, request, send_from_directory
 import session as session_mod
 
-from config import ALIAS_STRONG_THRESHOLD, CONTACTS_RE, DEBUG_TOKEN, PORT, PRICE_LOOKUP_RE, PRICE_CONCERN_RE, DEFAULT_CLIENT_ID, resolve_client_id
+from config import (
+    ALIAS_STRONG_THRESHOLD,
+    ANTI_SPAM_NO_INTENT_TURNS,
+    CONTACTS_RE,
+    DEBUG_TOKEN,
+    DEFAULT_CLIENT_ID,
+    INPUT_MAX_CHARS,
+    PORT,
+    PRICE_CONCERN_RE,
+    PRICE_LOOKUP_RE,
+    RATE_LIMIT_MAX_PER_IP,
+    RATE_LIMIT_WINDOW_SEC,
+    SAFETY_RED_CONFIDENCE_THRESHOLD,
+    resolve_client_id,
+)
 from lead_service import handle_lead
 from logging_setup import get_logger, make_request_context, log_json
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
-from llm import classify_intent
+from llm import classify_complaint_request, classify_intent, classify_safety
 from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
@@ -39,9 +55,11 @@ from session import (
     parse_yes,
     record_last_bot_payload,
     set_last_catalog_service,
+    set_anti_spam_redirect_shown,
     sid_from_body,
 )
 from ux_builder import (
+    _format_price_value,
     build_price_clarify_payload,
     build_price_concern_payload,
     build_price_lookup_payload,
@@ -50,6 +68,7 @@ from ux_builder import (
     internal_error_response,
     low_score_response,
     no_candidates_response,
+    offtopic_response,
     reset_session_response,
 )
 
@@ -82,6 +101,30 @@ TXT = {
     "situation_back_fallback": "Хорошо, продолжим. Задайте вопрос или выберите тему.",
     "followup_choose_topic": "Могу рассказать про этапы или про сроки — что выбрать?",
 }
+_IP_RATE_LOCK = threading.RLock()
+_IP_RATE_BUCKETS: dict[str, deque] = {}
+_HARD_JUNK_RE = re.compile(r"^[\W_0-9a-zA-Z]{4,40}$", re.U)
+_COMPLAINT_PREFILTER_RE = re.compile(
+    r"(жалоб|претензи|недовол|руководств|директор|главврач|старш.*врач|куда\s+жал|хочу\s+пожаловат)",
+    re.I | re.U,
+)
+_SAFETY_PREFILTER_RE = re.compile(
+    r"("
+    r"кров|кровотеч"
+    r"|выбил[аи]?\s+зуб"
+    r"|сломал[аи]?\s+челюст"
+    r"|травм\w*.{0,20}(челюст|лица)"
+    r"|от[её]к\s+(лица|горла|языка)"
+    r"|распухл[оа]?\s+(лицо|горло|язык)"
+    r"|трудно\s+(дышать|глотать)"
+    r"|задыхаюсь"
+    r"|температур"
+    r"|гной.{0,30}(десн|зуб|лунк|после)"
+    r"|после\s+удалени[яия]"
+    r"|антибиотик"
+    r")",
+    re.I | re.U,
+)
 
 
 def _get_last_content_ui_payload_compat(sid: str) -> dict | None:
@@ -217,6 +260,204 @@ def _is_short_contextual(q: str, st: dict) -> bool:
     if _NEUTRAL_RX.search(q):
         return True
     return False
+
+
+def _normalize_question_text(text: str) -> tuple[str, bool]:
+    q = (text or "").strip()
+    if len(q) <= INPUT_MAX_CHARS:
+        return q, False
+    return q[:INPUT_MAX_CHARS], True
+
+
+def _resolve_request_ip() -> str:
+    xff = (request.headers.get("X-Forwarded-For") or "").strip()
+    if xff:
+        return xff.split(",", 1)[0].strip() or (request.remote_addr or "unknown")
+    return request.remote_addr or "unknown"
+
+
+def _check_rate_limit(ip: str) -> bool:
+    now = time.time()
+    with _IP_RATE_LOCK:
+        q = _IP_RATE_BUCKETS.get(ip)
+        if q is None:
+            q = deque()
+            _IP_RATE_BUCKETS[ip] = q
+        threshold = now - float(RATE_LIMIT_WINDOW_SEC)
+        while q and q[0] < threshold:
+            q.popleft()
+        if len(q) >= int(RATE_LIMIT_MAX_PER_IP):
+            return False
+        q.append(now)
+        return True
+
+
+def _rate_limited_response_payload() -> dict:
+    return {
+        "answer": "Слишком много запросов за короткое время. Подождите немного и попробуйте снова.",
+        "quick_replies": [],
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {"error": "rate_limited"},
+    }
+
+
+def _is_hard_junk(q: str) -> bool:
+    s = (q or "").strip()
+    if len(s) < 4:
+        return False
+    if _HARD_JUNK_RE.fullmatch(s):
+        return True
+    return False
+
+
+def _junk_payload(sid: str, client_id: str | None) -> dict:
+    return {
+        "answer": "Похоже, это нерелевантный запрос. Я помогаю только по вопросам клиники и записи.",
+        "quick_replies": [],
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {"sid": sid, "client_id": client_id, "hard_junk": True},
+    }
+
+
+def _maybe_safety_related(q: str) -> bool:
+    return bool(_SAFETY_PREFILTER_RE.search((q or "").strip()))
+
+
+def _safety_red_payload(sid: str, client_id: str | None) -> dict:
+    return {
+        "answer": (
+            "Похоже, это ситуация, где лучше не разбираться через чат. "
+            "Если есть у вас острые симптомы — обратитесь за очной медицинской помощью как можно скорее.\n"
+            "Я могу подсказать контакты клиники или передать администратору, "
+            "но не стоит ждать ответа в чате, если состояние острое."
+        ),
+        "quick_replies": [],
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {"sid": sid, "client_id": client_id, "safety_red": True},
+    }
+
+
+def _maybe_complaint_related(q: str) -> bool:
+    return bool(_COMPLAINT_PREFILTER_RE.search((q or "").strip()))
+
+
+def _complaint_payload(sid: str, client_id: str | None) -> dict:
+    return {
+        "answer": (
+            "Это вопрос лучше передать администратору. "
+            "Оставьте, пожалуйста, заявку — мы свяжемся с вами и поможем решить вопрос."
+        ),
+        "quick_replies": [],
+        "cta": {"text": "Связаться с администратором", "action": "lead"},
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {"sid": sid, "client_id": client_id, "complaint_handoff": True},
+    }
+
+
+def _norm_dup_text(q: str) -> str:
+    x = (q or "").strip().lower().replace("ё", "е")
+    x = re.sub(r"[^\w\s]", " ", x, flags=re.U)
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
+
+
+def _is_duplicate_question(st: dict, q: str) -> bool:
+    qn = _norm_dup_text(q)
+    if len(qn) < 5:
+        return False
+    hist = list((st or {}).get("hist") or [])
+    last_users = [m.get("content", "") for m in hist if isinstance(m, dict) and m.get("role") == "user"]
+    if not last_users:
+        return False
+    recent = last_users[-2:]
+    return any(_norm_dup_text(x) == qn for x in recent)
+
+
+def _duplicate_payload(sid: str, client_id: str | None, snap: dict | None) -> dict:
+    quick = list((snap or {}).get("quick_replies") or [])
+    cta = (snap or {}).get("cta")
+    return {
+        "answer": "Похоже, мы это уже обсудили чуть выше. Если хотите, могу продолжить по следующему шагу.",
+        "quick_replies": quick[:2],
+        "cta": cta if isinstance(cta, dict) else None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {"sid": sid, "client_id": client_id, "duplicate_short_circuit": True},
+    }
+
+
+def _should_soft_redirect_no_intent(st: dict) -> bool:
+    turns = int((st or {}).get("session_turn_count") or 0)
+    booking_ever = bool((st or {}).get("booking_intent_ever"))
+    shown = bool((st or {}).get("anti_spam_redirect_shown"))
+    return turns >= ANTI_SPAM_NO_INTENT_TURNS and (not booking_ever) and (not shown)
+
+
+def _soft_redirect_payload(sid: str, client_id: str | None) -> dict:
+    payload = _service_payload(
+        "Я рассказал уже довольно много о разных темах. Возможно, удобнее обсудить вашу ситуацию напрямую — консультация бесплатна, врач ответит на всё сразу.",
+        sid,
+        client_id,
+        lead_flow=False,
+        lead_step=None,
+        quick_replies=[],
+        cta=None,
+    )
+    meta = payload.setdefault("meta", {})
+    meta["anti_spam_soft_redirect"] = True
+    return payload
+
+
+def _with_default_anchor(md_entry_ref: str) -> str:
+    ref = (md_entry_ref or "").strip()
+    if not ref:
+        return ""
+    return ref if "#" in ref else f"{ref}#korotko"
+
+
+def _load_prices_for_client(client_id: str | None) -> dict:
+    cid = (client_id or DEFAULT_CLIENT_ID).strip() or DEFAULT_CLIENT_ID
+    p = os.path.join("clients", cid, "prices.json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _service_price_line_for_content(service: dict, client_id: str | None) -> str | None:
+    if not isinstance(service, dict):
+        return None
+    if str(service.get("price_display") or "").strip().lower() != "always":
+        return None
+    price_key = str(service.get("price_key") or "").strip()
+    if not price_key:
+        return None
+    prices = _load_prices_for_client(client_id)
+    price_item = prices.get(price_key) if isinstance(prices, dict) else None
+    if not isinstance(price_item, dict):
+        return None
+    rendered = _format_price_value(price_item)
+    if not rendered:
+        return None
+    note = str(price_item.get("note") or "").strip()
+    line = f"Стоимость: {rendered}."
+    if note:
+        line += f" Важно: {note}."
+    return line
 
 
 def safe_jsonify(payload):
@@ -365,13 +606,62 @@ def ask():
         if client_id is None:
             return jsonify({"error": "unknown_client"}), 403
 
-        q = (data.get("q") or "").strip()
+        q_raw = data.get("q") or ""
+        q = (q_raw or "").strip()
         ref = (data.get("ref") or "").strip()
         sid = sid_from_body(data)
 
-        if data.get("q") and data.get("q").strip().lower() in ("/reset", "/новая"):
+        if q and q.lower() in ("/reset", "/новая"):
             mem_reset(sid)
             return safe_jsonify(reset_session_response(sid))
+        q, truncated = _normalize_question_text(q_raw)
+        if truncated:
+            log_json(logger, "input_truncated", sid=sid, client_id=client_id, original_len=len((q_raw or "").strip()), max_len=INPUT_MAX_CHARS)
+        ip = _resolve_request_ip()
+        if not _check_rate_limit(ip):
+            log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
+            return safe_jsonify(_rate_limited_response_payload()), 429
+        if _is_hard_junk(q):
+            log_json(logger, "hard_junk_hit", sid=sid, client_id=client_id)
+            return _service_reply(_junk_payload(sid, client_id), sid, q)
+        if _maybe_safety_related(q):
+            sc = classify_safety(q, client_id=client_id, sid=sid)
+            is_red = (
+                str(sc.get("label") or "").lower() == "red"
+                and float(sc.get("confidence") or 0.0) >= float(SAFETY_RED_CONFIDENCE_THRESHOLD)
+            )
+            log_json(
+                logger,
+                "safety_gate",
+                sid=sid,
+                client_id=client_id,
+                prefilter_hit=True,
+                label=sc.get("label"),
+                confidence=sc.get("confidence"),
+                threshold=SAFETY_RED_CONFIDENCE_THRESHOLD,
+                is_red=is_red,
+            )
+            if is_red:
+                return _service_reply(_safety_red_payload(sid, client_id), sid, q)
+        if _maybe_complaint_related(q):
+            cc = classify_complaint_request(q, client_id=client_id, sid=sid)
+            is_complaint = (
+                str(cc.get("label") or "").lower() == "complaint_or_management_contact"
+                and float(cc.get("confidence") or 0.0) >= 0.8
+            )
+            log_json(
+                logger,
+                "complaint_gate",
+                sid=sid,
+                client_id=client_id,
+                prefilter_hit=True,
+                label=cc.get("label"),
+                confidence=cc.get("confidence"),
+                threshold=0.8,
+                is_complaint=is_complaint,
+            )
+            if is_complaint:
+                return _service_reply(_complaint_payload(sid, client_id), sid, q)
 
         st = mem_get(sid)
 
@@ -408,6 +698,22 @@ def ask():
                 q,
                 doc_id=flow_result.get("doc_id"),
             )
+
+        st = mem_get(sid)
+        if _is_duplicate_question(st, q):
+            snap = _get_last_content_ui_payload_compat(sid)
+            log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
+            return _service_reply(_duplicate_payload(sid, client_id, snap), sid, q)
+        if _should_soft_redirect_no_intent(st):
+            set_anti_spam_redirect_shown(sid, True)
+            log_json(
+                logger,
+                "anti_spam_soft_redirect",
+                sid=sid,
+                client_id=client_id,
+                session_turn_count=int(st.get("session_turn_count") or 0),
+            )
+            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q)
 
         if ref:
             ch = get_chunk_by_ref(ref, client_id=client_id)
@@ -448,6 +754,9 @@ def ask():
 
         intent = classify_intent(q, client_id=client_id, sid=sid)
 
+        if intent == "offtopic":
+            return _service_reply(offtopic_response(), sid, q)
+
         if intent == "contacts":
             cands = retrieve(q, topk=4, client_id=client_id)
             picked = pick_contacts_chunk(cands)
@@ -486,6 +795,8 @@ def ask():
                 service_id = str(price_route.get("matched_service_id") or "")
                 match_score = float(price_route.get("match_score") or 0.0)
                 route_source = str(price_route.get("route_source") or "catalog")
+                if service_id:
+                    set_last_catalog_service(sid, service_id)
                 if intent == "price_concern":
                     concern_ref = str(service.get("concern_ref") or "").strip()
                     if concern_ref:
@@ -563,6 +874,38 @@ def ask():
 
         if intent == "content":
             cat = select_catalog_content_route(q, client_id=client_id)
+            if cat.get("mode") == "md_first":
+                sid_svc = str(cat.get("matched_service_id") or "")
+                md_ref = _with_default_anchor(str(cat.get("md_entry_ref") or ""))
+                service = cat.get("service") or {}
+                price_line = _service_price_line_for_content(service, client_id)
+                if md_ref:
+                    ch = get_chunk_by_ref(md_ref, client_id=client_id)
+                    if ch:
+                        log_json(
+                            logger,
+                            "catalog_route",
+                            route="md_first",
+                            matched_service_id=sid_svc,
+                            match_score=cat.get("match_score"),
+                            md_entry_ref=md_ref,
+                        )
+                        if sid_svc:
+                            set_last_catalog_service(sid, sid_svc)
+                        llm_q = q or f"Информация из {md_ref}"
+                        if price_line:
+                            llm_q = f"{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}"
+                        return respond_from_chunk(
+                            chunk=ch,
+                            q=q,
+                            sid=sid,
+                            client_id=client_id,
+                            finalize_ask=finalize_ask,
+                            safe_jsonify=safe_jsonify,
+                            logger=logger,
+                            llm_question=llm_q,
+                            log_event="Answer generated from md_entry_ref",
+                        )
             if cat.get("mode") == "facts":
                 svc = cat.get("service") or {}
                 sid_svc = str(cat.get("matched_service_id") or "")
@@ -574,6 +917,11 @@ def ask():
                     match_score=float(cat.get("match_score") or 0.0),
                     user_question=q,
                 )
+                price_line = _service_price_line_for_content(svc, client_id)
+                if price_line:
+                    base = (payload.get("answer") or "").strip()
+                    payload["answer"] = f"{base}\n\n{price_line}" if base else price_line
+                    payload.setdefault("meta", {})["price_display_applied"] = "always"
                 log_json(
                     logger,
                     "catalog_route",
@@ -715,13 +1063,62 @@ def ask_stream():
         if client_id is None:
             return jsonify({"error": "unknown_client"}), 403
 
-        q = (data.get("q") or "").strip()
+        q_raw = data.get("q") or ""
+        q = (q_raw or "").strip()
         ref = (data.get("ref") or "").strip()
         sid = sid_from_body(data)
 
-        if data.get("q") and data.get("q").strip().lower() in ("/reset", "/новая"):
+        if q and q.lower() in ("/reset", "/новая"):
             mem_reset(sid)
             return safe_jsonify(reset_session_response(sid))
+        q, truncated = _normalize_question_text(q_raw)
+        if truncated:
+            log_json(logger, "input_truncated", sid=sid, client_id=client_id, original_len=len((q_raw or "").strip()), max_len=INPUT_MAX_CHARS)
+        ip = _resolve_request_ip()
+        if not _check_rate_limit(ip):
+            log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
+            return safe_jsonify(_rate_limited_response_payload()), 429
+        if _is_hard_junk(q):
+            log_json(logger, "hard_junk_hit", sid=sid, client_id=client_id)
+            return _sse_service_reply(_junk_payload(sid, client_id), sid, q)
+        if _maybe_safety_related(q):
+            sc = classify_safety(q, client_id=client_id, sid=sid)
+            is_red = (
+                str(sc.get("label") or "").lower() == "red"
+                and float(sc.get("confidence") or 0.0) >= float(SAFETY_RED_CONFIDENCE_THRESHOLD)
+            )
+            log_json(
+                logger,
+                "safety_gate",
+                sid=sid,
+                client_id=client_id,
+                prefilter_hit=True,
+                label=sc.get("label"),
+                confidence=sc.get("confidence"),
+                threshold=SAFETY_RED_CONFIDENCE_THRESHOLD,
+                is_red=is_red,
+            )
+            if is_red:
+                return _sse_service_reply(_safety_red_payload(sid, client_id), sid, q)
+        if _maybe_complaint_related(q):
+            cc = classify_complaint_request(q, client_id=client_id, sid=sid)
+            is_complaint = (
+                str(cc.get("label") or "").lower() == "complaint_or_management_contact"
+                and float(cc.get("confidence") or 0.0) >= 0.8
+            )
+            log_json(
+                logger,
+                "complaint_gate",
+                sid=sid,
+                client_id=client_id,
+                prefilter_hit=True,
+                label=cc.get("label"),
+                confidence=cc.get("confidence"),
+                threshold=0.8,
+                is_complaint=is_complaint,
+            )
+            if is_complaint:
+                return _sse_service_reply(_complaint_payload(sid, client_id), sid, q)
 
         st = mem_get(sid)
 
@@ -750,6 +1147,22 @@ def ask_stream():
                 flow_result["payload"], sid, q, doc_id=flow_result.get("doc_id")
             )
 
+        st = mem_get(sid)
+        if _is_duplicate_question(st, q):
+            snap = _get_last_content_ui_payload_compat(sid)
+            log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
+            return _sse_service_reply(_duplicate_payload(sid, client_id, snap), sid, q)
+        if _should_soft_redirect_no_intent(st):
+            set_anti_spam_redirect_shown(sid, True)
+            log_json(
+                logger,
+                "anti_spam_soft_redirect",
+                sid=sid,
+                client_id=client_id,
+                session_turn_count=int(st.get("session_turn_count") or 0),
+            )
+            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q)
+
         if ref:
             ch = get_chunk_by_ref(ref, client_id=client_id)
             if ch:
@@ -773,6 +1186,9 @@ def ask_stream():
                     )
 
         intent = classify_intent(q, client_id=client_id, sid=sid)
+
+        if intent == "offtopic":
+            return _sse_service_reply(offtopic_response(), sid, q)
 
         if intent == "contacts":
             cands = retrieve(q, topk=4, client_id=client_id)
@@ -802,6 +1218,8 @@ def ask_stream():
                 service_id = str(price_route.get("matched_service_id") or "")
                 match_score = float(price_route.get("match_score") or 0.0)
                 route_source = str(price_route.get("route_source") or "catalog")
+                if service_id:
+                    set_last_catalog_service(sid, service_id)
                 if intent == "price_concern":
                     concern_ref = str(service.get("concern_ref") or "").strip()
                     if concern_ref:
@@ -858,6 +1276,32 @@ def ask_stream():
 
         if intent == "content":
             cat = select_catalog_content_route(q, client_id=client_id)
+            if cat.get("mode") == "md_first":
+                sid_svc = str(cat.get("matched_service_id") or "")
+                md_ref = _with_default_anchor(str(cat.get("md_entry_ref") or ""))
+                service = cat.get("service") or {}
+                price_line = _service_price_line_for_content(service, client_id)
+                if md_ref:
+                    ch = get_chunk_by_ref(md_ref, client_id=client_id)
+                    if ch:
+                        log_json(
+                            logger,
+                            "catalog_route",
+                            route="md_first",
+                            matched_service_id=sid_svc,
+                            match_score=cat.get("match_score"),
+                            md_entry_ref=md_ref,
+                        )
+                        if sid_svc:
+                            set_last_catalog_service(sid, sid_svc)
+                        llm_q = q or f"Информация из {md_ref}"
+                        if price_line:
+                            llm_q = f"{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}"
+                        return _sse_chunk_response(
+                            ch, q, sid, client_id,
+                            llm_question=llm_q,
+                            log_event="Answer generated from md_entry_ref",
+                        )
             if cat.get("mode") == "facts":
                 svc = cat.get("service") or {}
                 sid_svc = str(cat.get("matched_service_id") or "")
@@ -867,6 +1311,11 @@ def ask_stream():
                     match_score=float(cat.get("match_score") or 0.0),
                     user_question=q,
                 )
+                price_line = _service_price_line_for_content(svc, client_id)
+                if price_line:
+                    base = (payload.get("answer") or "").strip()
+                    payload["answer"] = f"{base}\n\n{price_line}" if base else price_line
+                    payload.setdefault("meta", {})["price_display_applied"] = "always"
                 log_json(logger, "catalog_route", route="facts",
                          matched_service_id=sid_svc, match_score=cat.get("match_score"))
                 if sid_svc:

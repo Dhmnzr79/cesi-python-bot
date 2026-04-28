@@ -61,6 +61,8 @@ def _fresh_defaults() -> dict:
         "situation_pending": False,
         "situation_note": "",
         "lead_intent": "none",
+        "booking_intent_ever": False,
+        "anti_spam_redirect_shown": False,
         "lead_pending_name": "",
         "shown_cta_topics": [],
         "topic_state": {},
@@ -418,6 +420,20 @@ def set_lead_intent(session_id: str, intent: str) -> None:
     with _lock:
         st = mem_get(session_id)
         st["lead_intent"] = intent
+        _persist_unlocked(session_id, st)
+
+
+def mark_booking_intent_ever(session_id: str) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["booking_intent_ever"] = True
+        _persist_unlocked(session_id, st)
+
+
+def set_anti_spam_redirect_shown(session_id: str, shown: bool = True) -> None:
+    with _lock:
+        st = mem_get(session_id)
+        st["anti_spam_redirect_shown"] = bool(shown)
         _persist_unlocked(session_id, st)
 
 

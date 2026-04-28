@@ -1,4 +1,4 @@
-﻿---
+---
 doc_id: extraction__service__tooth_extraction
 topic: extraction
 subtopic: tooth_extraction

@@ -10,6 +10,7 @@ from config import (
     BOOKING_INTENT_LLM_ON,
     CHAT_JSON_MODE,
     CHAT_MODEL,
+    COMPLAINT_CLASSIFY_MODEL,
     EMPATHY_ON,
     LEAD_NAME_CLASSIFY_MODEL,
     MEMORY_ON,
@@ -21,6 +22,7 @@ from config import (
     QUERY_REWRITE_ON,
     QUERY_REWRITE_VALIDATE_OVERLAP,
     REWRITE_REJECT_SUBSTRINGS,
+    SAFETY_CLASSIFY_MODEL,
 )
 from logging_setup import get_logger, log_json
 from session import (
@@ -573,6 +575,131 @@ def classify_price_intent(user_message: str, *, client_id: str | None, sid: str)
         return "other"
 
 
+_SAFETY_CLASSIFY_SYSTEM = (
+    "Ты классифицируешь сообщение пациента стоматологической клиники.\n"
+    "Верни label=red только если сообщение явно описывает острое состояние:\n"
+    "- сильное кровотечение или кровь не останавливается\n"
+    "- травма лица/челюсти/зуба\n"
+    "- отёк лица/горла/языка, трудно дышать или глотать\n"
+    "- высокая температура после лечения\n"
+    "- гной после процедуры\n"
+    "- просьба назначить антибиотики, дозировку или схему лечения\n"
+    "Не возвращай red для конверсионных страхов и сомнений: боюсь боли, страшно лечить, "
+    "переживаю, что не приживётся, плохой опыт, дорого, сомневаюсь.\n"
+    "Если не уверен — верни normal_sales_concern.\n"
+    'Ответь JSON: {"label":"red|normal_sales_concern","confidence":0-1}. Без markdown.'
+)
+
+
+def classify_safety(user_message: str, *, client_id: str | None, sid: str) -> dict:
+    msg = (user_message or "").strip()
+    if len(msg) < 2:
+        return {"label": "normal_sales_concern", "confidence": 0.0}
+    try:
+        resp = client.chat.completions.create(
+            model=SAFETY_CLASSIFY_MODEL,
+            temperature=0,
+            max_completion_tokens=60,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _SAFETY_CLASSIFY_SYSTEM},
+                {"role": "user", "content": msg[:700]},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("safety_not_object")
+        label = str(obj.get("label") or "").strip().lower()
+        if label not in {"red", "normal_sales_concern"}:
+            label = "normal_sales_concern"
+        try:
+            confidence = float(obj.get("confidence"))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        log_json(
+            logger,
+            "safety_classify",
+            client_id=client_id,
+            sid=sid,
+            label=label,
+            confidence=round(confidence, 4),
+            msg_len=len(msg),
+        )
+        return {"label": label, "confidence": confidence}
+    except Exception as e:
+        log_json(
+            logger,
+            "safety_classify_failed",
+            client_id=client_id,
+            sid=sid,
+            err=str(e)[:300],
+        )
+        return {"label": "normal_sales_concern", "confidence": 0.0}
+
+
+_COMPLAINT_CLASSIFY_SYSTEM = (
+    "Ты классифицируешь сообщение пациента стоматологической клиники.\n"
+    "Верни label=complaint_or_management_contact, только если пользователь явно:\n"
+    "- жалуется на сервис/врача/опыт,\n"
+    "- просит контакт руководства/директора/главврача,\n"
+    "- хочет оставить претензию.\n"
+    "Во всех остальных случаях верни normal.\n"
+    'Ответь JSON: {"label":"complaint_or_management_contact|normal","confidence":0-1}. Без markdown.'
+)
+
+
+def classify_complaint_request(user_message: str, *, client_id: str | None, sid: str) -> dict:
+    msg = (user_message or "").strip()
+    if len(msg) < 2:
+        return {"label": "normal", "confidence": 0.0}
+    try:
+        resp = client.chat.completions.create(
+            model=COMPLAINT_CLASSIFY_MODEL,
+            temperature=0,
+            max_completion_tokens=60,
+            response_format={"type": "json_object"},
+            timeout=LLM_REQUEST_TIMEOUT_SEC,
+            messages=[
+                {"role": "system", "content": _COMPLAINT_CLASSIFY_SYSTEM},
+                {"role": "user", "content": msg[:700]},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("complaint_not_object")
+        label = str(obj.get("label") or "").strip().lower()
+        if label not in {"complaint_or_management_contact", "normal"}:
+            label = "normal"
+        try:
+            confidence = float(obj.get("confidence"))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        log_json(
+            logger,
+            "complaint_classify",
+            client_id=client_id,
+            sid=sid,
+            label=label,
+            confidence=round(confidence, 4),
+            msg_len=len(msg),
+        )
+        return {"label": label, "confidence": confidence}
+    except Exception as e:
+        log_json(
+            logger,
+            "complaint_classify_failed",
+            client_id=client_id,
+            sid=sid,
+            err=str(e)[:300],
+        )
+        return {"label": "normal", "confidence": 0.0}
+
+
 _INTENT_CLASSIFY_SYSTEM = (
     "Ты классификатор намерения пользователя в чате стоматологии. "
     "Определи intent по одному сообщению пациента.\n\n"
@@ -581,12 +708,14 @@ _INTENT_CLASSIFY_SYSTEM = (
     "- price_lookup: вопрос про цену или стоимость конкретной услуги\n"
     "- price_concern: сомнение по цене — дорого, почему так дорого, "
     "не по карману, у конкурентов дешевле\n"
+    "- offtopic: вопрос не про клинику и не про медицинскую консультацию в рамках сервиса "
+    "(например: погода, политика, стихи, программирование, общие факты вне темы)\n"
     "- content: всё остальное — услуги, врачи, процедуры, страхи, "
     "сроки, безопасность, рассрочка, противопоказания и т.д.\n\n"
     "Важно: рассрочка, полис, скидки без жалобы дорого — content.\n"
     "FAQ как записаться / куда звонить — content.\n"
     'Ответь одним JSON: {"intent": "contacts|price_lookup|'
-    'price_concern|content"}. Без markdown.'
+    'price_concern|offtopic|content"}. Без markdown.'
 )
 
 
@@ -613,7 +742,7 @@ def classify_intent(
         if not isinstance(obj, dict):
             raise ValueError("intent_not_object")
         intent = str(obj.get("intent") or "").strip().lower()
-        if intent not in {"contacts", "price_lookup", "price_concern", "content"}:
+        if intent not in {"contacts", "price_lookup", "price_concern", "offtopic", "content"}:
             intent = "content"
         log_json(
             logger, "intent_classify",

@@ -74,7 +74,8 @@ def main():
     os.makedirs("data", exist_ok=True)
     corpus, embeds = [], []
     for path in glob.glob("md/**/*.md", recursive=True):
-        fm = frontmatter.load(path)
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            fm = frontmatter.load(fh)
         meta = fm.metadata or {}
         rel_parts = os.path.normpath(path).split(os.sep)
         client_id = rel_parts[1] if len(rel_parts) > 2 else DEFAULT_CLIENT_ID

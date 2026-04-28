@@ -27,6 +27,9 @@ PRICE_INTENT_LLM_ON = os.getenv("PRICE_INTENT_LLM_ON", "1").lower() in (
     "yes",
 )
 PRICE_INTENT_LLM_MODEL = (os.getenv("PRICE_INTENT_LLM_MODEL") or "").strip() or CHAT_MODEL
+SAFETY_CLASSIFY_MODEL = (os.getenv("MODEL_SAFETY_CLASSIFY") or "").strip() or "gpt-5.4-nano"
+SAFETY_RED_CONFIDENCE_THRESHOLD = float(os.getenv("SAFETY_RED_CONFIDENCE_THRESHOLD", "0.8"))
+COMPLAINT_CLASSIFY_MODEL = (os.getenv("MODEL_COMPLAINT_CLASSIFY") or "").strip() or "gpt-5.4-nano"
 QUERY_REWRITE_ON = os.getenv("QUERY_REWRITE_ON", "1").lower() in ("1", "true", "yes")
 QUERY_REWRITE_MAX_MESSAGES = int(os.getenv("QUERY_REWRITE_MAX_MESSAGES", "10"))
 # Подстроки в ответе rewrite → отбросить (утечка инструкции / мусор). Разделитель |
@@ -46,6 +49,10 @@ QUERY_REWRITE_VALIDATE_OVERLAP = os.getenv("QUERY_REWRITE_VALIDATE_OVERLAP", "1"
 # --- HTTP / app ---
 PORT = int(os.getenv("PORT", "9000"))
 DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "dev-debug")
+INPUT_MAX_CHARS = int(os.getenv("INPUT_MAX_CHARS", "600"))
+RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60"))
+RATE_LIMIT_MAX_PER_IP = int(os.getenv("RATE_LIMIT_MAX_PER_IP", "40"))
+ANTI_SPAM_NO_INTENT_TURNS = int(os.getenv("ANTI_SPAM_NO_INTENT_TURNS", "10"))
 
 # --- Paths ---
 DATA_DIR = os.getenv("DATA_DIR", "data")
@@ -118,6 +125,10 @@ PRICE_SERVICE_MATCH_STRONG = float(os.getenv("PRICE_SERVICE_MATCH_STRONG", "0.62
 MEMORY_ON = True
 MAX_TURNS = 8
 MAX_IDLE_SEC = 60 * 60
+
+# --- Кэш retrieval ---
+RETRIEVE_CACHE_TTL_SEC = int(os.getenv("RETRIEVE_CACHE_TTL_SEC", "120"))
+RETRIEVE_CACHE_MAXSIZE = int(os.getenv("RETRIEVE_CACHE_MAXSIZE", "512"))
 
 # --- Эмпатия ---
 EMPATHY_ON = True

@@ -1,4 +1,4 @@
-﻿---
+---
 doc_id: implantation__faq__tooth_one_day
 topic: implantation
 subtopic: tooth_one_day

@@ -1,4 +1,4 @@
-﻿---
+---
 doc_id: prosthetics__service__zirconia_crowns
 topic: prosthetics
 subtopic: zirconia_crowns

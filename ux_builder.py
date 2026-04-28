@@ -24,7 +24,7 @@ def heading_label(md_file: str, sect_id: str, client_id: str | None = None) -> s
         return (sect_id or "").replace("-", " ").capitalize()
     try:
         path = get_doc_path(os.path.basename(md_file), client_id=client_id) or md_file
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             txt = f.read()
         rx3 = re.compile(
             rf"^###\s+(.*?)\s*\{{#{re.escape(sect_id)}\}}\s*$", re.M | re.I
@@ -235,6 +235,21 @@ def no_candidates_response() -> dict:
     }
 
 
+def offtopic_response() -> dict:
+    return {
+        "answer": (
+            "Я помогаю по вопросам клиники: услуги, цены, подготовка, сроки, запись и контакты. "
+            "Если хотите, подскажу по вашему вопросу в этом контексте."
+        ),
+        "quick_replies": [],
+        "cta": None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {"offtopic": True},
+    }
+
+
 def reset_session_response(sid: str) -> dict:
     return {
         "answer": "Начнём заново. Чем помочь?",
@@ -376,12 +391,12 @@ def build_price_lookup_payload(
     rendered = _format_price_value(price_item or {})
     note = (price_item or {}).get("note")
     if rendered:
-        answer = f"{title}: {rendered}."
+        answer = f"Да, такая услуга у нас есть. {title}: {rendered}."
         if isinstance(note, str) and note.strip():
             answer += f" Важно: {note.strip()}."
     else:
         answer = (
-            f"«Точная стоимость «{title}» определяется после консультации — она у нас бесплатна. "
+            f"Да, такая услуга у нас есть. Точная стоимость «{title}» определяется после консультации — она у нас бесплатна. "
             "Цена фиксируется в договоре до начала лечения, без скрытых доплат. "
             "Возможен налоговый вычет 13%.»"
         )

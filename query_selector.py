@@ -446,10 +446,11 @@ def select_price_service_route(
 def select_catalog_content_route(q: str, *, client_id: str | None) -> dict:
     """Информационный маршрут по service_catalog (без ценового интента).
 
-    Только для сервисов без MD-страницы (md_entry_ref=null) с facts-карточкой.
-    Контентные запросы к сервисам с MD-страницей идут в retrieval — он семантически
-    точнее и не требует эвристик для разграничения запросов. Такой подход
-    масштабируется на любой клиентский корпус без изменения логики роутинга.
+    Гибрид:
+    - если сервис уверенно распознан и у него есть MD-страница (md_entry_ref),
+      сначала пробуем route в конкретный md (md_first);
+    - если MD нет, но есть facts, отвечаем facts-карточкой;
+    - иначе mode=none и дальше общий retrieval.
     """
     match = match_service_from_catalog(q, client_id=client_id)
     if not match.get("matched_service_id") or not match.get("is_confident"):
@@ -457,7 +458,13 @@ def select_catalog_content_route(q: str, *, client_id: str | None) -> dict:
     service = match.get("service") or {}
     md_raw = service.get("md_entry_ref")
     if isinstance(md_raw, str) and md_raw.strip():
-        return {"mode": "none"}
+        return {
+            "mode": "md_first",
+            "matched_service_id": match.get("matched_service_id"),
+            "match_score": match.get("match_score"),
+            "service": service,
+            "md_entry_ref": md_raw.strip(),
+        }
     facts = [str(x).strip() for x in (service.get("facts") or []) if str(x).strip()]
     if not facts:
         return {"mode": "none"}

@@ -15,7 +15,8 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 def _read_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
+    # utf-8-sig: strips UTF-8 BOM so ^--- frontmatter regex and YAML match the file start.
+    with open(path, "r", encoding="utf-8-sig") as f:
         return f.read()
 
 def _parse_front_matter(text: str) -> dict:
