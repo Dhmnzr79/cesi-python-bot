@@ -53,6 +53,8 @@ INPUT_MAX_CHARS = int(os.getenv("INPUT_MAX_CHARS", "600"))
 RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60"))
 RATE_LIMIT_MAX_PER_IP = int(os.getenv("RATE_LIMIT_MAX_PER_IP", "40"))
 ANTI_SPAM_NO_INTENT_TURNS = int(os.getenv("ANTI_SPAM_NO_INTENT_TURNS", "10"))
+ANTI_SPAM_BURST_WINDOW_SEC = int(os.getenv("ANTI_SPAM_BURST_WINDOW_SEC", "120"))
+ANTI_SPAM_BURST_MESSAGES = int(os.getenv("ANTI_SPAM_BURST_MESSAGES", "6"))
 
 # --- Paths ---
 DATA_DIR = os.getenv("DATA_DIR", "data")

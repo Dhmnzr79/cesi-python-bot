@@ -14,6 +14,8 @@ import session as session_mod
 from config import (
     ALIAS_STRONG_THRESHOLD,
     ANTI_SPAM_NO_INTENT_TURNS,
+    ANTI_SPAM_BURST_MESSAGES,
+    ANTI_SPAM_BURST_WINDOW_SEC,
     CONTACTS_RE,
     DEBUG_TOKEN,
     DEFAULT_CLIENT_ID,
@@ -23,14 +25,13 @@ from config import (
     PRICE_LOOKUP_RE,
     RATE_LIMIT_MAX_PER_IP,
     RATE_LIMIT_WINDOW_SEC,
-    SAFETY_RED_CONFIDENCE_THRESHOLD,
     resolve_client_id,
 )
 from lead_service import handle_lead
 from logging_setup import get_logger, make_request_context, log_json
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
-from llm import classify_complaint_request, classify_intent, classify_safety
+from llm import classify_handoff_filter, classify_intent
 from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
@@ -103,28 +104,8 @@ TXT = {
 }
 _IP_RATE_LOCK = threading.RLock()
 _IP_RATE_BUCKETS: dict[str, deque] = {}
-_HARD_JUNK_RE = re.compile(r"^[\W_0-9a-zA-Z]{4,40}$", re.U)
-_COMPLAINT_PREFILTER_RE = re.compile(
-    r"(жалоб|претензи|недовол|руководств|директор|главврач|старш.*врач|куда\s+жал|хочу\s+пожаловат)",
-    re.I | re.U,
-)
-_SAFETY_PREFILTER_RE = re.compile(
-    r"("
-    r"кров|кровотеч"
-    r"|выбил[аи]?\s+зуб"
-    r"|сломал[аи]?\s+челюст"
-    r"|травм\w*.{0,20}(челюст|лица)"
-    r"|от[её]к\s+(лица|горла|языка)"
-    r"|распухл[оа]?\s+(лицо|горло|язык)"
-    r"|трудно\s+(дышать|глотать)"
-    r"|задыхаюсь"
-    r"|температур"
-    r"|гной.{0,30}(десн|зуб|лунк|после)"
-    r"|после\s+удалени[яия]"
-    r"|антибиотик"
-    r")",
-    re.I | re.U,
-)
+_OBVIOUS_NOISE_RE = re.compile(r"^[^А-Яа-яЁёA-Za-z]{4,}$", re.U)
+_REPEATED_CHAR_RE = re.compile(r"(.)\1{5,}", re.U)
 
 
 def _get_last_content_ui_payload_compat(sid: str) -> dict | None:
@@ -304,64 +285,68 @@ def _rate_limited_response_payload() -> dict:
     }
 
 
-def _is_hard_junk(q: str) -> bool:
+def _handoff_filter_payload(
+    sid: str,
+    client_id: str | None,
+    *,
+    reason: str,
+) -> dict:
+    no_cta_reasons = {
+        "spam",
+        "flood",
+        "trolling",
+        "abuse",
+        "offtopic",
+        "prompt_injection",
+        "acute_symptom",
+        "medical_advice",
+        "legal",
+    }
+    use_cta = (reason or "").strip().lower() not in no_cta_reasons
+    return {
+        "answer": (
+            "Понимаю. Такой вопрос лучше передать администратору, чтобы вам ответили "
+            "корректно и без лишних ожиданий. Оставьте, пожалуйста, контакт — "
+            "администратор свяжется с вами. Если ситуация срочная, пожалуйста, не ждите "
+            "ответа в чате — позвоните в клинику напрямую."
+        ),
+        "quick_replies": [],
+        "cta": {"text": "Связаться с администратором", "action": "lead"} if use_cta else None,
+        "video": None,
+        "situation": {"show": False, "mode": "normal"},
+        "offer": None,
+        "meta": {
+            "sid": sid,
+            "client_id": client_id,
+            "handoff_filter": True,
+            "handoff_label": "handoff",
+            "handoff_reason": (reason or "unspecified")[:64],
+        },
+    }
+
+
+def _is_obvious_noise(q: str) -> bool:
     s = (q or "").strip()
-    if len(s) < 4:
+    if not s:
         return False
-    if _HARD_JUNK_RE.fullmatch(s):
+    if len(s) <= 3 and not any(ch.isalpha() for ch in s):
+        return True
+    if _OBVIOUS_NOISE_RE.fullmatch(s):
+        return True
+    if _REPEATED_CHAR_RE.search(s):
         return True
     return False
 
 
-def _junk_payload(sid: str, client_id: str | None) -> dict:
+def _obvious_noise_payload(sid: str, client_id: str | None) -> dict:
     return {
-        "answer": "Похоже, это нерелевантный запрос. Я помогаю только по вопросам клиники и записи.",
+        "answer": "Похоже, сообщение не распознано. Я помогу по вопросам клиники, записи, услуг и стоимости.",
         "quick_replies": [],
         "cta": None,
         "video": None,
         "situation": {"show": False, "mode": "normal"},
         "offer": None,
-        "meta": {"sid": sid, "client_id": client_id, "hard_junk": True},
-    }
-
-
-def _maybe_safety_related(q: str) -> bool:
-    return bool(_SAFETY_PREFILTER_RE.search((q or "").strip()))
-
-
-def _safety_red_payload(sid: str, client_id: str | None) -> dict:
-    return {
-        "answer": (
-            "Похоже, это ситуация, где лучше не разбираться через чат. "
-            "Если есть у вас острые симптомы — обратитесь за очной медицинской помощью как можно скорее.\n"
-            "Я могу подсказать контакты клиники или передать администратору, "
-            "но не стоит ждать ответа в чате, если состояние острое."
-        ),
-        "quick_replies": [],
-        "cta": None,
-        "video": None,
-        "situation": {"show": False, "mode": "normal"},
-        "offer": None,
-        "meta": {"sid": sid, "client_id": client_id, "safety_red": True},
-    }
-
-
-def _maybe_complaint_related(q: str) -> bool:
-    return bool(_COMPLAINT_PREFILTER_RE.search((q or "").strip()))
-
-
-def _complaint_payload(sid: str, client_id: str | None) -> dict:
-    return {
-        "answer": (
-            "Это вопрос лучше передать администратору. "
-            "Оставьте, пожалуйста, заявку — мы свяжемся с вами и поможем решить вопрос."
-        ),
-        "quick_replies": [],
-        "cta": {"text": "Связаться с администратором", "action": "lead"},
-        "video": None,
-        "situation": {"show": False, "mode": "normal"},
-        "offer": None,
-        "meta": {"sid": sid, "client_id": client_id, "complaint_handoff": True},
+        "meta": {"sid": sid, "client_id": client_id, "obvious_noise": True},
     }
 
 
@@ -405,6 +390,19 @@ def _should_soft_redirect_no_intent(st: dict) -> bool:
     return turns >= ANTI_SPAM_NO_INTENT_TURNS and (not booking_ever) and (not shown)
 
 
+def _is_message_burst(st: dict) -> bool:
+    ts = list((st or {}).get("user_turn_timestamps") or [])
+    if not ts:
+        return False
+    now = time.time()
+    recent = [
+        float(x)
+        for x in ts
+        if isinstance(x, (int, float)) and float(x) >= (now - ANTI_SPAM_BURST_WINDOW_SEC)
+    ]
+    return len(recent) >= ANTI_SPAM_BURST_MESSAGES
+
+
 def _soft_redirect_payload(sid: str, client_id: str | None) -> dict:
     payload = _service_payload(
         "Я рассказал уже довольно много о разных темах. Возможно, удобнее обсудить вашу ситуацию напрямую — консультация бесплатна, врач ответит на всё сразу.",
@@ -413,7 +411,7 @@ def _soft_redirect_payload(sid: str, client_id: str | None) -> dict:
         lead_flow=False,
         lead_step=None,
         quick_replies=[],
-        cta=None,
+        cta={"text": "Связаться с администратором", "action": "lead"},
     )
     meta = payload.setdefault("meta", {})
     meta["anti_spam_soft_redirect"] = True
@@ -621,47 +619,35 @@ def ask():
         if not _check_rate_limit(ip):
             log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
             return safe_jsonify(_rate_limited_response_payload()), 429
-        if _is_hard_junk(q):
-            log_json(logger, "hard_junk_hit", sid=sid, client_id=client_id)
-            return _service_reply(_junk_payload(sid, client_id), sid, q)
-        if _maybe_safety_related(q):
-            sc = classify_safety(q, client_id=client_id, sid=sid)
-            is_red = (
-                str(sc.get("label") or "").lower() == "red"
-                and float(sc.get("confidence") or 0.0) >= float(SAFETY_RED_CONFIDENCE_THRESHOLD)
-            )
+        if _is_obvious_noise(q):
+            log_json(logger, "obvious_noise_short_circuit", sid=sid, client_id=client_id)
+            return _service_reply(_obvious_noise_payload(sid, client_id), sid, q)
+        if q:
+            hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
+            label = str(hf.get("label") or "").lower()
+            reason = str(hf.get("reason") or "unspecified").lower()
+            confidence = float(hf.get("confidence") or 0.0)
+            is_handoff = label == "handoff"
             log_json(
                 logger,
-                "safety_gate",
+                "handoff_filter_gate",
                 sid=sid,
                 client_id=client_id,
-                prefilter_hit=True,
-                label=sc.get("label"),
-                confidence=sc.get("confidence"),
-                threshold=SAFETY_RED_CONFIDENCE_THRESHOLD,
-                is_red=is_red,
+                label=label,
+                reason=reason[:64],
+                confidence=round(confidence, 4),
+                is_handoff=is_handoff,
             )
-            if is_red:
-                return _service_reply(_safety_red_payload(sid, client_id), sid, q)
-        if _maybe_complaint_related(q):
-            cc = classify_complaint_request(q, client_id=client_id, sid=sid)
-            is_complaint = (
-                str(cc.get("label") or "").lower() == "complaint_or_management_contact"
-                and float(cc.get("confidence") or 0.0) >= 0.8
-            )
-            log_json(
-                logger,
-                "complaint_gate",
-                sid=sid,
-                client_id=client_id,
-                prefilter_hit=True,
-                label=cc.get("label"),
-                confidence=cc.get("confidence"),
-                threshold=0.8,
-                is_complaint=is_complaint,
-            )
-            if is_complaint:
-                return _service_reply(_complaint_payload(sid, client_id), sid, q)
+            if is_handoff:
+                return _service_reply(
+                    _handoff_filter_payload(
+                        sid=sid,
+                        client_id=client_id,
+                        reason=reason,
+                    ),
+                    sid,
+                    q,
+                )
 
         st = mem_get(sid)
 
@@ -704,6 +690,17 @@ def ask():
             snap = _get_last_content_ui_payload_compat(sid)
             log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
             return _service_reply(_duplicate_payload(sid, client_id, snap), sid, q)
+        if _is_message_burst(st):
+            set_anti_spam_redirect_shown(sid, True)
+            log_json(
+                logger,
+                "anti_spam_burst_redirect",
+                sid=sid,
+                client_id=client_id,
+                burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC,
+                burst_messages=ANTI_SPAM_BURST_MESSAGES,
+            )
+            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q)
         if _should_soft_redirect_no_intent(st):
             set_anti_spam_redirect_shown(sid, True)
             log_json(
@@ -1078,47 +1075,35 @@ def ask_stream():
         if not _check_rate_limit(ip):
             log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
             return safe_jsonify(_rate_limited_response_payload()), 429
-        if _is_hard_junk(q):
-            log_json(logger, "hard_junk_hit", sid=sid, client_id=client_id)
-            return _sse_service_reply(_junk_payload(sid, client_id), sid, q)
-        if _maybe_safety_related(q):
-            sc = classify_safety(q, client_id=client_id, sid=sid)
-            is_red = (
-                str(sc.get("label") or "").lower() == "red"
-                and float(sc.get("confidence") or 0.0) >= float(SAFETY_RED_CONFIDENCE_THRESHOLD)
-            )
+        if _is_obvious_noise(q):
+            log_json(logger, "obvious_noise_short_circuit", sid=sid, client_id=client_id)
+            return _sse_service_reply(_obvious_noise_payload(sid, client_id), sid, q)
+        if q:
+            hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
+            label = str(hf.get("label") or "").lower()
+            reason = str(hf.get("reason") or "unspecified").lower()
+            confidence = float(hf.get("confidence") or 0.0)
+            is_handoff = label == "handoff"
             log_json(
                 logger,
-                "safety_gate",
+                "handoff_filter_gate",
                 sid=sid,
                 client_id=client_id,
-                prefilter_hit=True,
-                label=sc.get("label"),
-                confidence=sc.get("confidence"),
-                threshold=SAFETY_RED_CONFIDENCE_THRESHOLD,
-                is_red=is_red,
+                label=label,
+                reason=reason[:64],
+                confidence=round(confidence, 4),
+                is_handoff=is_handoff,
             )
-            if is_red:
-                return _sse_service_reply(_safety_red_payload(sid, client_id), sid, q)
-        if _maybe_complaint_related(q):
-            cc = classify_complaint_request(q, client_id=client_id, sid=sid)
-            is_complaint = (
-                str(cc.get("label") or "").lower() == "complaint_or_management_contact"
-                and float(cc.get("confidence") or 0.0) >= 0.8
-            )
-            log_json(
-                logger,
-                "complaint_gate",
-                sid=sid,
-                client_id=client_id,
-                prefilter_hit=True,
-                label=cc.get("label"),
-                confidence=cc.get("confidence"),
-                threshold=0.8,
-                is_complaint=is_complaint,
-            )
-            if is_complaint:
-                return _sse_service_reply(_complaint_payload(sid, client_id), sid, q)
+            if is_handoff:
+                return _sse_service_reply(
+                    _handoff_filter_payload(
+                        sid=sid,
+                        client_id=client_id,
+                        reason=reason,
+                    ),
+                    sid,
+                    q,
+                )
 
         st = mem_get(sid)
 
@@ -1152,6 +1137,17 @@ def ask_stream():
             snap = _get_last_content_ui_payload_compat(sid)
             log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
             return _sse_service_reply(_duplicate_payload(sid, client_id, snap), sid, q)
+        if _is_message_burst(st):
+            set_anti_spam_redirect_shown(sid, True)
+            log_json(
+                logger,
+                "anti_spam_burst_redirect",
+                sid=sid,
+                client_id=client_id,
+                burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC,
+                burst_messages=ANTI_SPAM_BURST_MESSAGES,
+            )
+            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q)
         if _should_soft_redirect_no_intent(st):
             set_anti_spam_redirect_shown(sid, True)
             log_json(

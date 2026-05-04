@@ -68,6 +68,7 @@ def _fresh_defaults() -> dict:
         "topic_state": {},
         "last_content_ui_payload": None,
         "last_catalog_service_id": None,
+        "user_turn_timestamps": [],
     }
 
 
@@ -131,6 +132,9 @@ def mem_add_user(session_id: str, text: str) -> None:
         st["hist"].append({"role": "user", "content": text})
         st["turn_count"] = int(st.get("turn_count") or 0) + 1
         st["session_turn_count"] = int(st.get("session_turn_count") or 0) + 1
+        ts_list = list(st.get("user_turn_timestamps") or [])
+        ts_list.append(time.time())
+        st["user_turn_timestamps"] = ts_list[-50:]
         m = PHONE_RX.search(text)
         if m:
             st["profile"]["phone"] = m.group().replace(" ", "")
