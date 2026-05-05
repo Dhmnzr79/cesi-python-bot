@@ -144,6 +144,26 @@ TRIGGERS = {
 }
 TRIGGERS_COMPILED = {k: re.compile(v, re.I | re.U) for k, v in TRIGGERS.items()}
 
+_LLM_PRICE_IN_PER_1M = float(os.getenv("BOT_LLM_USD_PER_1M_PROMPT", "0") or "0")
+_LLM_PRICE_OUT_PER_1M = float(os.getenv("BOT_LLM_USD_PER_1M_COMPLETION", "0") or "0")
+
+
+def estimate_llm_usage_usd(
+    *,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+) -> float | None:
+    """Грубая оценка затрат для дашборда. Нули env → вернуть None (не гадать)."""
+    if _LLM_PRICE_IN_PER_1M <= 0 and _LLM_PRICE_OUT_PER_1M <= 0:
+        return None
+    pt = int(prompt_tokens or 0)
+    ct = int(completion_tokens or 0)
+    return round(
+        (pt * _LLM_PRICE_IN_PER_1M + ct * _LLM_PRICE_OUT_PER_1M) / 1_000_000.0,
+        8,
+    )
+
+
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY is not set in .env")
 

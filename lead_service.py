@@ -6,7 +6,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from uuid import uuid4
 
-from logging_setup import get_logger, log_json
+from logging_setup import emit_bot_event, get_logger, log_json
 from session import normalize_phone
 
 logger = get_logger("bot")
@@ -75,6 +75,12 @@ def handle_lead(data: dict) -> tuple[dict, int]:
     situation_note = (data.get("situation_note") or "").strip()
 
     if not phone:
+        emit_bot_event(
+            logger,
+            "lead_submitted",
+            status="bad_phone",
+            details={"ok": False, "error_code": "bad_phone", "delivery": None},
+        )
         return {"ok": False, "error_code": "bad_phone", "delivery": None}, 400
 
     os.makedirs("leads", exist_ok=True)
@@ -92,6 +98,19 @@ def handle_lead(data: dict) -> tuple[dict, int]:
 
     sent, send_err = _send_lead_email(rec)
     if sent:
+        emit_bot_event(
+            logger,
+            "lead_submitted",
+            status="ok",
+            details={
+                "ok": True,
+                "delivery": "email",
+                "error_code": None,
+                "intent": intent,
+                "has_name": bool(name),
+                "has_situation_note": bool(situation_note),
+            },
+        )
         return {"ok": True, "error_code": None, "delivery": "email"}, 200
 
     try:
@@ -104,6 +123,18 @@ def handle_lead(data: dict) -> tuple[dict, int]:
             sid=sid,
             error_code=send_err or "email_send_failed",
         )
+        emit_bot_event(
+            logger,
+            "lead_submitted",
+            status="ok",
+            details={
+                "ok": True,
+                "delivery": "file_fallback",
+                "error_code": send_err or "email_send_failed",
+                "intent": intent,
+                "has_name": bool(name),
+            },
+        )
         return {
             "ok": True,
             "error_code": send_err or "email_send_failed",
@@ -111,4 +142,15 @@ def handle_lead(data: dict) -> tuple[dict, int]:
         }, 200
     except Exception as e:
         log_json(logger, "lead_fallback_write_failed", err=str(e)[:300], client_id=client_id, sid=sid)
+        emit_bot_event(
+            logger,
+            "lead_submitted",
+            status="error",
+            details={
+                "ok": False,
+                "delivery": None,
+                "error_code": "fallback_write_failed",
+                "err": str(e)[:300],
+            },
+        )
         return {"ok": False, "error_code": "fallback_write_failed", "delivery": None}, 500

@@ -2,6 +2,8 @@
 
 Документ описывает актуальную архитектуру после серии hardening-итераций перед demo-prod запуском.
 
+По дашборду и логированию отдельный рабочий документ: `docs/DASHBOARD_LOGGING_PLAN.md`.
+
 ---
 
 ## 1) Цель версии
@@ -24,6 +26,7 @@
 ### Debug роуты
 - `/_debug/ping`, `/__debug/retrieval`
 - При `APP_ENV=prod` → `404`, иначе требуют `X-Debug-Token`.
+- Мини-дашборд последних `bot_event`: `GET /dashboard` (HTML) и `GET /dashboard/events` (JSON). В `prod` нужен заголовок/параметр `X-Dashboard-Token` / `?token=` — значение из `DASHBOARD_TOKEN` или, если не задан, `DEBUG_TOKEN`. Запросы к `/dashboard*` не логируются как `http_request`, чтобы не засорять JSONL автопереобновлениями.
 
 ---
 
@@ -58,7 +61,7 @@ HTTP-граница, валидация `client_id`, маршрутизация 
 Контентный пайплайн: chunk → LLM answer → policy → session side-effects → JSON.
 
 ### `session.py`
-SQLite session state. Хранит `current_doc_id`, `last_catalog_service_id`, историю диалога, topic state.
+SQLite session state. Хранит `current_doc_id`, `last_catalog_service_id`, историю диалога, topic state, `client_id` (заполняется при `_bind_chat_ctx` на `/ask` и `/lead`).
 
 ### `meta_loader.py`
 Загрузка frontmatter MD-файлов. `doc_id` — имя файла без `.md` если не задан явно.
@@ -67,7 +70,7 @@ SQLite session state. Хранит `current_doc_id`, `last_catalog_service_id`, 
 Email-доставка лида. При ошибке — file fallback (`leads/*.json`).
 
 ### `logging_setup.py`
-JSONL-логирование. Маскирование PII (phone), санитизация секретов.
+JSONL-логирование. Маскирование PII (phone), санитизация секретов. Продуктовые события с `kind="bot_event"` и `schema_version` (см. эмиттер `emit_bot_event`): `user_turn_completed`, `bot_reply_completed`, `cta_shown`, `lead_submitted`, `retrieval_selected`, `retrieval_fallback`, `llm_usage`, `llm_error`; в HTTP-контексте в лог подставляются `request_id`, `sid`, `client_id`, `path`. Оценка USD в `llm_usage` — опционально через `BOT_LLM_USD_PER_1M_PROMPT` / `BOT_LLM_USD_PER_1M_COMPLETION` в `.env`.
 
 ---
 
@@ -189,6 +192,7 @@ respond_from_chunk → LLM answer → policy → session → JSON
 ## 9) Session state
 
 Ключевые поля в SQLite:
+- `client_id` — последний известный `client_id` с `/ask` и `/lead` (для дашборда)
 - `current_doc_id` — doc_id последнего отвеченного чанка (имя файла без `.md`)
 - `last_catalog_service_id` — последняя услуга из каталога
 - `hist` — история диалога (последние N реплик для rewrite)

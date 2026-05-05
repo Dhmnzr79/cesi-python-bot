@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Bot — события</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #238636;
+    }
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+    .wrap { margin: 0 auto; max-width: 1200px; padding: 1.25rem; }
+    h1 { font-size: 1.2rem; font-weight: 600; margin: 0 0 0.35rem 0; }
+    .muted { color: var(--muted); font-size: 0.875rem; margin: 0 0 1rem 0; line-height: 1.45; }
+    code { font-size: 0.85em; background: var(--panel); padding: 0.1em 0.35em; border-radius: 4px; border: 1px solid var(--border); }
+    .toolbar {
+      display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
+      padding: 0.75rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1rem;
+    }
+    input[type=text], input[type=password] {
+      background: var(--bg); border: 1px solid var(--border); color: inherit; padding: 0.4rem 0.55rem;
+      border-radius: 6px; min-width: 10rem; font-size: 0.9rem;
+    }
+    button {
+      background: var(--accent); color: #fff; border: none; padding: 0.45rem 0.9rem; border-radius: 6px;
+      cursor: pointer; font-size: 0.9rem;
+    }
+    button:hover { filter: brightness(1.07); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+    th, td { border: 1px solid var(--border); padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }
+    th { background: var(--panel); font-weight: 600; white-space: nowrap; }
+    tr:nth-child(even) td { background: #0f1419; }
+    .mono { font-family: ui-monospace, Consolas, monospace; word-break: break-all; font-size: 0.78rem; }
+    .details { max-width: 28rem; max-height: 6rem; overflow: auto; }
+    #status { font-size: 0.85rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>События бота</h1>
+    <p class="muted">
+      Записи с <code>kind: bot_event</code> из текущего JSONL-лога. На локалке (не <code>APP_ENV=prod</code>) токен не нужен.
+      На сервере с prod — укажите тот же секрет, что и для debug, или задайте <code>DASHBOARD_TOKEN</code> в окружении.
+    </p>
+    <div class="toolbar">
+      <button type="button" id="btn">Обновить</button>
+      <label>Токен (prod) <input type="password" id="token" placeholder="если нужен"/></label>
+      <label>Фильтр <input type="text" id="filter" placeholder="event, sid, request_id…"/></label>
+      <span id="status"></span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Время</th>
+          <th>Событие</th>
+          <th>sid</th>
+          <th>client</th>
+          <th>status</th>
+          <th>details</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+  <script>
+    function tokHeaders() {
+      const t = document.getElementById('token').value.trim();
+      return t ? { 'X-Dashboard-Token': t } : {};
+    }
+    function tokQs() {
+      const t = document.getElementById('token').value.trim();
+      return t ? ('?token=' + encodeURIComponent(t)) : '';
+    }
+    let lastMeta = { count: 0, log_file: '' };
+    let lastEvents = [];
+
+    function stringifyDetails(o) {
+      const d = o && o.details;
+      if (!d || typeof d !== 'object') return '';
+      try { return JSON.stringify(d); } catch (e) { return String(d); }
+    }
+    function rowMatches(filt, ev) {
+      if (!filt) return true;
+      const blob = JSON.stringify(ev).toLowerCase();
+      return blob.includes(filt);
+    }
+    function renderTable() {
+      const st = document.getElementById('status');
+      const tbody = document.getElementById('tbody');
+      const filt = document.getElementById('filter').value.trim().toLowerCase();
+      const evs = lastEvents.filter(ev => rowMatches(filt, ev));
+      st.textContent = 'В логе (последняя выборка): ' + lastMeta.count + ' · после фильтра: ' + evs.length
+        + (lastMeta.log_file ? ' · ' + lastMeta.log_file : '');
+      tbody.innerHTML = evs.map(ev => {
+        const det = stringifyDetails(ev);
+        return '<tr>'
+          + '<td class="mono">' + (ev.ts || '-') + '</td>'
+          + '<td><strong>' + (ev.event || '-') + '</strong></td>'
+          + '<td class="mono">' + (ev.sid || ev.session_id || '—') + '</td>'
+          + '<td class="mono">' + (ev.client_id || '—') + '</td>'
+          + '<td>' + (ev.status != null ? String(ev.status) : '—') + '</td>'
+          + '<td class="mono details">' + det.replace(/</g, '&lt;') + '</td>'
+          + '</tr>';
+      }).join('');
+    }
+    async function refresh() {
+      const tbody = document.getElementById('tbody');
+      const st = document.getElementById('status');
+      st.textContent = 'Загрузка…';
+      tbody.innerHTML = '';
+      try {
+        const url = '/dashboard/events' + tokQs();
+        const r = await fetch(url, { headers: tokHeaders() });
+        if (!r.ok) {
+          lastEvents = [];
+          st.textContent = 'Ошибка ' + r.status + (r.status === 404 ? ' (на prod нужен верный token)' : '');
+          return;
+        }
+        const data = await r.json();
+        lastEvents = data.events || [];
+        lastMeta = { count: data.count || 0, log_file: data.log_file || '' };
+        renderTable();
+      } catch (e) {
+        lastEvents = [];
+        st.textContent = 'Сеть: ' + e;
+      }
+    }
+    document.getElementById('btn').onclick = refresh;
+    document.getElementById('filter').oninput = () => debouncedRender();
+    let t = null;
+    function debouncedRender() {
+      clearTimeout(t);
+      t = setTimeout(renderTable, 200);
+    }
+    refresh();
+  </script>
+</body>
+</html>

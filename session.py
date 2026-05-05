@@ -47,6 +47,7 @@ def _connect() -> sqlite3.Connection:
 
 def _fresh_defaults() -> dict:
     return {
+        "client_id": None,
         "hist": deque(maxlen=MAX_TURNS * 2),
         "profile": {},
         "ts": time.time(),
@@ -99,6 +100,19 @@ def _persist_unlocked(sid: str, st: dict) -> None:
 
 def _now() -> float:
     return time.time()
+
+
+def bind_client_id(session_id: str, client_id: str | None) -> None:
+    """Фиксируем client_id в SQLite-сессии (дашборд / мультиклиент позже)."""
+    cid = (client_id or "").strip()
+    if not cid:
+        return
+    with _lock:
+        st = mem_get(session_id)
+        if st.get("client_id") == cid:
+            return
+        st["client_id"] = cid
+        _persist_unlocked(session_id, st)
 
 
 def sid_from_body(body: dict) -> str:

@@ -19,6 +19,7 @@ from session import mem_get
 from policy import contacts_intent, pick_contacts_chunk, pick_prices_chunk, price_intent
 from retriever import (
     broad_query_detect,
+    chunk_info,
     corpus_alias_leader,
     is_point_literal_query,
     llm_rerank,
@@ -105,6 +106,7 @@ def select_chunk_for_question(
                     }
                 ),
             }
+        top_cinfo = chunk_info(cands[0], cands[0].get("_score")) if cands else None
         return {
             "mode": "low_score",
             "debug_meta": _dm(
@@ -114,6 +116,7 @@ def select_chunk_for_question(
                     "alias_score": round(float(alias_score or 0.0), 4),
                     "is_contacts": bool(is_contacts),
                     "is_price": bool(is_price),
+                    "top_candidate": top_cinfo,
                 }
             ),
         }
@@ -219,6 +222,13 @@ def _token_set(s: str) -> set[str]:
     return {t for t in _norm(s).split() if len(t) >= 2 or t.isdigit()}
 
 
+def _contains_token_phrase(query_norm: str, phrase_norm: str) -> bool:
+    if not query_norm or not phrase_norm:
+        return False
+    pattern = r"(?<!\w)" + re.escape(phrase_norm) + r"(?!\w)"
+    return bool(re.search(pattern, query_norm, flags=re.U))
+
+
 def _core_tokens_catalog(text: str) -> list[str]:
     return [t for t in _norm(text).split() if (len(t) >= 2 or t.isdigit()) and t not in _STOP]
 
@@ -252,7 +262,7 @@ def _match_score(query: str, phrase: str) -> float:
     pn = _norm(phrase)
     if not qn or not pn:
         return 0.0
-    if pn in qn:
+    if _contains_token_phrase(qn, pn):
         return 1.0
     qt = _token_set(qn)
     pt = _token_set(pn)

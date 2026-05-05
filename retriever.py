@@ -19,7 +19,7 @@ from config import (
     RETRIEVE_CACHE_TTL_SEC,
 )
 from llm import client
-from logging_setup import get_logger, log_json
+from logging_setup import get_logger, log_json, log_llm_usage
 from meta_loader import get_doc_meta, get_doc_path
 
 import alias_lexical
@@ -951,6 +951,7 @@ def llm_rerank(q: str, cands: list) -> dict:
             temperature=0,
             response_format={"type": "json_object"},
         )
+        log_llm_usage(logger, out, call_type="rerank", model=RERANK_MODEL)
         raw = (out.choices[0].message.content or "").strip()
         try:
             obj = json.loads(raw)

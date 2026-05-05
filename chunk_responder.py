@@ -216,7 +216,15 @@ def respond_from_chunk(
         score=round(float(chunk.get("_score", 0.0)), 3),
         answer_length=len(answer),
     )
-    return safe_jsonify(finalize_ask(payload, sid, q, doc_id=doc_id))
+    qs = (q or "").strip()
+    turn_meta = (
+        {"interaction": "user_message", "question_len": len(qs), "preview": qs[:120]}
+        if qs
+        else None
+    )
+    return safe_jsonify(
+        finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta),
+    )
 
 
 def respond_from_chunk_stream(
@@ -329,7 +337,13 @@ def respond_from_chunk_stream(
         score=round(float(chunk.get("_score", 0.0)), 3),
         answer_length=len(answer),
     )
-    final = finalize_ask(payload, sid, q, doc_id=doc_id)
+    qs = (q or "").strip()
+    turn_meta = (
+        {"interaction": "user_message", "question_len": len(qs), "preview": qs[:120]}
+        if qs
+        else None
+    )
+    final = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta)
     yield f"event: ui\ndata: {_json.dumps(final, ensure_ascii=False, default=_sse_default)}\n\n"
     yield "event: done\ndata: {}\n\n"
 

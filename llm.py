@@ -24,7 +24,7 @@ from config import (
     REWRITE_REJECT_SUBSTRINGS,
     SAFETY_CLASSIFY_MODEL,
 )
-from logging_setup import get_logger, log_json
+from logging_setup import get_logger, log_json, log_llm_error, log_llm_stream_usage, log_llm_usage
 from session import (
     is_first_in_topic,
     mem_context,
@@ -128,6 +128,9 @@ def rewrite_query_for_retrieval(
                 {"role": "user", "content": user_block},
             ],
         )
+        log_llm_usage(
+            logger, resp, call_type="retrieval_query_rewrite", model=QUERY_REWRITE_MODEL
+        )
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -165,6 +168,12 @@ def rewrite_query_for_retrieval(
         )
         return effective
     except Exception as e:
+        log_llm_error(
+            logger,
+            call_type="retrieval_query_rewrite",
+            err=str(e),
+            model=QUERY_REWRITE_MODEL,
+        )
         log_json(
             logger,
             "retrieval_query_rewrite_failed",
@@ -215,6 +224,7 @@ def generate_facts_card_answer(
                 {"role": "user", "content": user_msg},
             ],
         )
+        log_llm_usage(logger, resp, call_type="facts_card", model=CHAT_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         answer = str(obj.get("answer") or "").strip()
@@ -222,6 +232,7 @@ def generate_facts_card_answer(
             log_json(logger, "facts_card_llm", client_id=client_id, sid=sid, title=title)
             return answer
     except Exception as exc:
+        log_llm_error(logger, call_type="facts_card", err=str(exc), model=CHAT_MODEL)
         log_json(logger, "facts_card_llm_error", client_id=client_id, sid=sid, error=str(exc))
     return None
 
@@ -309,6 +320,7 @@ def generate_answer_with_empathy(
     kwargs["timeout"] = LLM_REQUEST_TIMEOUT_SEC
     try:
         resp = client.chat.completions.create(**kwargs)
+        log_llm_usage(logger, resp, call_type="chat_answer", model=CHAT_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         answer = raw
         if CHAT_JSON_MODE:
@@ -329,6 +341,7 @@ def generate_answer_with_empathy(
             used_fallback=bool(answer == LLM_FALLBACK_ANSWER),
         )
     except Exception as e:
+        log_llm_error(logger, call_type="chat_answer", err=str(e), model=CHAT_MODEL)
         log_json(
             logger,
             "llm_generate_failed",
@@ -361,21 +374,40 @@ def generate_answer_stream(user_q: str, context_md: str, meta: dict, session_id:
                 break
 
     full_text = ""
+    stream_usage = None
     try:
-        stream = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            stream=True,
-            timeout=LLM_REQUEST_TIMEOUT_SEC,
-        )
+        try:
+            stream = client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=messages,
+                stream=True,
+                timeout=LLM_REQUEST_TIMEOUT_SEC,
+                stream_options={"include_usage": True},
+            )
+        except TypeError:
+            stream = client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=messages,
+                stream=True,
+                timeout=LLM_REQUEST_TIMEOUT_SEC,
+            )
         for chunk in stream:
             if chunk.choices:
                 delta = chunk.choices[0].delta.content or ""
                 if delta:
                     full_text += delta
                     yield ("delta", delta)
+            u = getattr(chunk, "usage", None)
+            if u is not None:
+                stream_usage = u
         if not full_text.strip():
             full_text = LLM_FALLBACK_ANSWER
+        log_llm_stream_usage(
+            logger,
+            stream_usage,
+            call_type="chat_answer_stream",
+            model=CHAT_MODEL,
+        )
         log_json(
             logger,
             "llm_generate_stream",
@@ -384,6 +416,7 @@ def generate_answer_stream(user_q: str, context_md: str, meta: dict, session_id:
             empathy_used=bool(use_empathy),
         )
     except Exception as e:
+        log_llm_error(logger, call_type="chat_answer_stream", err=str(e), model=CHAT_MODEL)
         log_json(
             logger,
             "llm_generate_stream_failed",
@@ -434,6 +467,9 @@ def classify_lead_name_shape(
                 {"role": "user", "content": payload},
             ],
         )
+        log_llm_usage(
+            logger, resp, call_type="lead_name_classify", model=LEAD_NAME_CLASSIFY_MODEL
+        )
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -450,6 +486,9 @@ def classify_lead_name_shape(
             )
             return label
     except Exception as e:
+        log_llm_error(
+            logger, call_type="lead_name_classify", err=str(e), model=LEAD_NAME_CLASSIFY_MODEL
+        )
         log_json(
             logger,
             "lead_name_classify_failed",
@@ -492,6 +531,9 @@ def classify_booking_wants_appointment(
                 {"role": "user", "content": msg[:600]},
             ],
         )
+        log_llm_usage(
+            logger, resp, call_type="booking_intent", model=BOOKING_INTENT_LLM_MODEL
+        )
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -508,6 +550,9 @@ def classify_booking_wants_appointment(
         )
         return out
     except Exception as e:
+        log_llm_error(
+            logger, call_type="booking_intent", err=str(e), model=BOOKING_INTENT_LLM_MODEL
+        )
         log_json(
             logger,
             "booking_intent_llm_failed",
@@ -548,6 +593,7 @@ def classify_price_intent(user_message: str, *, client_id: str | None, sid: str)
                 {"role": "user", "content": msg[:700]},
             ],
         )
+        log_llm_usage(logger, resp, call_type="price_intent", model=PRICE_INTENT_LLM_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -565,6 +611,9 @@ def classify_price_intent(user_message: str, *, client_id: str | None, sid: str)
         )
         return label
     except Exception as e:
+        log_llm_error(
+            logger, call_type="price_intent", err=str(e), model=PRICE_INTENT_LLM_MODEL
+        )
         log_json(
             logger,
             "price_intent_llm_failed",
@@ -607,6 +656,7 @@ def classify_safety(user_message: str, *, client_id: str | None, sid: str) -> di
                 {"role": "user", "content": msg[:700]},
             ],
         )
+        log_llm_usage(logger, resp, call_type="safety_classify", model=SAFETY_CLASSIFY_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -630,6 +680,9 @@ def classify_safety(user_message: str, *, client_id: str | None, sid: str) -> di
         )
         return {"label": label, "confidence": confidence}
     except Exception as e:
+        log_llm_error(
+            logger, call_type="safety_classify", err=str(e), model=SAFETY_CLASSIFY_MODEL
+        )
         log_json(
             logger,
             "safety_classify_failed",
@@ -667,6 +720,7 @@ def classify_complaint_request(user_message: str, *, client_id: str | None, sid:
                 {"role": "user", "content": msg[:700]},
             ],
         )
+        log_llm_usage(logger, resp, call_type="complaint_classify", model=COMPLAINT_CLASSIFY_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -690,6 +744,9 @@ def classify_complaint_request(user_message: str, *, client_id: str | None, sid:
         )
         return {"label": label, "confidence": confidence}
     except Exception as e:
+        log_llm_error(
+            logger, call_type="complaint_classify", err=str(e), model=COMPLAINT_CLASSIFY_MODEL
+        )
         log_json(
             logger,
             "complaint_classify_failed",
@@ -738,6 +795,7 @@ def classify_handoff_filter(user_message: str, *, client_id: str | None, sid: st
                 {"role": "user", "content": msg[:1200]},
             ],
         )
+        log_llm_usage(logger, resp, call_type="handoff_filter", model=CHAT_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -765,6 +823,7 @@ def classify_handoff_filter(user_message: str, *, client_id: str | None, sid: st
         )
         return {"label": label, "reason": reason, "confidence": confidence}
     except Exception as e:
+        log_llm_error(logger, call_type="handoff_filter", err=str(e), model=CHAT_MODEL)
         log_json(
             logger,
             "handoff_filter_classify_failed",
@@ -816,6 +875,7 @@ def classify_intent(
                 {"role": "user", "content": msg[:700]},
             ],
         )
+        log_llm_usage(logger, resp, call_type="intent_classify", model=CHAT_MODEL)
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
         if not isinstance(obj, dict):
@@ -830,6 +890,7 @@ def classify_intent(
         )
         return intent
     except Exception as e:
+        log_llm_error(logger, call_type="intent_classify", err=str(e), model=CHAT_MODEL)
         log_json(
             logger, "intent_classify_failed",
             client_id=client_id, sid=sid, err=str(e)[:300],

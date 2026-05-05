@@ -28,7 +28,7 @@ from config import (
     resolve_client_id,
 )
 from lead_service import handle_lead
-from logging_setup import get_logger, make_request_context, log_json
+from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_context, log_json
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
@@ -48,6 +48,7 @@ from retriever import (
     retrieve,
 )
 from session import (
+    bind_client_id,
     get_topic_state,
     mem_add_bot,
     mem_add_user,
@@ -153,7 +154,15 @@ def _service_reply(
     if track_user and q:
         mem_add_user(sid, q)
     answer = (payload.get("answer") or "").strip()
-    out = finalize_ask(payload, sid, q, doc_id=doc_id)
+    turn_meta = None
+    if track_user and (q or "").strip():
+        qs = (q or "").strip()
+        turn_meta = {
+            "interaction": "user_message",
+            "question_len": len(qs),
+            "preview": qs[:120],
+        }
+    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta)
     if answer:
         mem_add_bot(sid, answer)
     return safe_jsonify(out)
@@ -462,7 +471,22 @@ def safe_jsonify(payload):
     return jsonify(_sanitize(payload))
 
 
-def finalize_ask(payload: dict, sid: str, q: str, *, doc_id: str | None = None) -> dict:
+def _bind_chat_ctx(sid: str, client_id: str) -> None:
+    """sid/client_id для логов + SQLite (dashboard)."""
+    request.ctx["sid"] = sid
+    request.ctx["session_id"] = sid
+    request.ctx["client_id"] = client_id
+    bind_client_id(sid, client_id)
+
+
+def finalize_ask(
+    payload: dict,
+    sid: str,
+    q: str,
+    *,
+    doc_id: str | None = None,
+    turn_meta: dict | None = None,
+) -> dict:
     record_last_bot_payload(sid, payload)
     st = mem_get(sid)
     meta = payload.setdefault("meta", {})
@@ -473,6 +497,34 @@ def finalize_ask(payload: dict, sid: str, q: str, *, doc_id: str | None = None) 
     else:
         meta["turn_count"] = session_turn_count
     meta["session_turn_count"] = session_turn_count
+
+    if turn_meta and turn_meta.get("interaction") == "user_message":
+        emit_bot_event(logger, "user_turn_completed", status="ok", details=turn_meta)
+    pmeta = payload.get("meta") or {}
+    emit_bot_event(
+        logger,
+        "bot_reply_completed",
+        status="ok",
+        details={
+            "answer_chars": len(str(payload.get("answer") or "")),
+            "doc_id": doc_id or pmeta.get("doc_id"),
+            "low_score": bool(pmeta.get("low_score")),
+            "handoff_filter": bool(pmeta.get("handoff_filter")),
+            "lead_flow": bool(pmeta.get("lead_flow")),
+            "intent": pmeta.get("intent"),
+            "meta_error": pmeta.get("error"),
+        },
+    )
+    cta = payload.get("cta")
+    if isinstance(cta, dict) and (cta.get("action") or cta.get("text")):
+        emit_bot_event(
+            logger,
+            "cta_shown",
+            details={
+                "action": str(cta.get("action") or ""),
+                "text_preview": str(cta.get("text") or "")[:120],
+            },
+        )
     return payload
 
 
@@ -484,6 +536,7 @@ def _log_selection(
     original_top_score,
     rerank_applied: bool,
 ):
+    chosen = chunk_info(chosen_chunk, chosen_score)
     log_json(
         logger,
         "selection",
@@ -492,7 +545,20 @@ def _log_selection(
             round(float(original_top_score), 4) if original_top_score is not None else None
         ),
         rerank_applied=bool(rerank_applied),
-        chosen=chunk_info(chosen_chunk, chosen_score),
+        chosen=chosen,
+    )
+    emit_bot_event(
+        logger,
+        "retrieval_selected",
+        status="chunk",
+        details={
+            "question_preview": (q or "")[:200],
+            "original_top_score": (
+                round(float(original_top_score), 4) if original_top_score is not None else None
+            ),
+            "rerank_applied": bool(rerank_applied),
+            "chosen": chosen,
+        },
     )
 
 
@@ -564,7 +630,7 @@ _startup_check()
 
 @app.before_request
 def _before():
-    request.ctx = make_request_context(session_id=request.cookies.get("sid"))
+    request.ctx = make_request_context(cookie_sid=request.cookies.get("sid"))
     request.ctx["path"] = request.path
     request.ctx["method"] = request.method
     request.ctx["t0"] = time.time()
@@ -572,6 +638,8 @@ def _before():
 
 @app.after_request
 def _after(resp):
+    if request.path.startswith("/dashboard"):
+        return resp
     latency = int((time.time() - request.ctx["t0"]) * 1000)
     log_json(
         logger,
@@ -595,6 +663,79 @@ def debug_ping():
     return jsonify({"ok": True})
 
 
+def _dashboard_guard():
+    """Локально / не-prod — без токена. В prod нужен X-Dashboard-Token или ?token= (env DASHBOARD_TOKEN или DEBUG_TOKEN)."""
+    if APP_ENV != "prod":
+        return None
+    want = (os.getenv("DASHBOARD_TOKEN") or "").strip() or DEBUG_TOKEN
+    got = (
+        request.headers.get("X-Dashboard-Token")
+        or request.args.get("token")
+        or ""
+    ).strip()
+    if got == want:
+        return None
+    return jsonify({"error": "not_found"}), 404
+
+
+def _load_recent_bot_events(
+    log_path: str,
+    *,
+    max_scan_lines: int,
+    limit: int,
+) -> list:
+    rows: list = []
+    if not os.path.isfile(log_path):
+        return rows
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        tail = deque(f, maxlen=max_scan_lines)
+    for raw in reversed(tail):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("kind") != "bot_event":
+            continue
+        rows.append(obj)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+@app.get("/dashboard")
+def dashboard_page():
+    denied = _dashboard_guard()
+    if denied:
+        return denied
+    return send_from_directory("static", "dashboard.html")
+
+
+@app.get("/dashboard/events")
+def dashboard_events_api():
+    denied = _dashboard_guard()
+    if denied:
+        return denied
+    try:
+        lim = min(max(int(request.args.get("limit", 200)), 1), 500)
+    except ValueError:
+        lim = 200
+    try:
+        scan = min(max(int(request.args.get("scan", 25000)), 100), 200000)
+    except ValueError:
+        scan = 25000
+    events = _load_recent_bot_events(LOG_FILE, max_scan_lines=scan, limit=lim)
+    payload = {
+        "count": len(events),
+        "events": events,
+    }
+    if APP_ENV != "prod":
+        payload["log_file"] = LOG_FILE
+    return jsonify(payload)
+
+
 @app.post("/ask")
 def ask():
     q = ""
@@ -613,6 +754,7 @@ def ask():
             mem_reset(sid)
             return safe_jsonify(reset_session_response(sid))
         q, truncated = _normalize_question_text(q_raw)
+        _bind_chat_ctx(sid, client_id)
         if truncated:
             log_json(logger, "input_truncated", sid=sid, client_id=client_id, original_len=len((q_raw or "").strip()), max_len=INPUT_MAX_CHARS)
         ip = _resolve_request_ip()
@@ -936,9 +1078,33 @@ def ask():
         dmeta = selection.get("debug_meta") or {}
         if mode == "no_candidates":
             log_json(logger, "No candidates found", question=q[:50])
+            emit_bot_event(
+                logger,
+                "retrieval_fallback",
+                status="no_candidates",
+                details={
+                    "reason": "no_candidates",
+                    "question_preview": (q or "")[:200],
+                    "top_score": dmeta.get("top_score"),
+                },
+            )
             return _service_reply(no_candidates_response(), sid, q)
         if mode == "low_score":
             log_json(logger, "low_score_fallback", **dmeta)
+            emit_bot_event(
+                logger,
+                "retrieval_fallback",
+                status="low_score",
+                details={
+                    "reason": "low_score",
+                    "question_preview": (q or "")[:200],
+                    "top_score": dmeta.get("top_score"),
+                    "threshold": dmeta.get("threshold"),
+                    "alias_score": dmeta.get("alias_score"),
+                    "top_candidate": dmeta.get("top_candidate"),
+                    "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
+                },
+            )
             st_ls = mem_get(sid)
             pls = low_score_response(sid, client_id)
             pls = _apply_response_policy_compat(
@@ -956,6 +1122,16 @@ def ask():
             final_chunk = selection.get("chunk")
             if not isinstance(final_chunk, dict):
                 log_json(logger, "selection_invalid_chunk", debug_meta=dmeta)
+                emit_bot_event(
+                    logger,
+                    "retrieval_fallback",
+                    status="invalid_chunk",
+                    details={
+                        "reason": "selection_invalid_chunk",
+                        "question_preview": (q or "")[:200],
+                        "debug_meta": dmeta,
+                    },
+                )
                 return _service_reply(no_candidates_response(), sid, q)
             if dmeta.get("selected_by") == "alias":
                 log_json(
@@ -983,10 +1159,27 @@ def ask():
                 logger=logger,
             )
         log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
+        emit_bot_event(
+            logger,
+            "retrieval_fallback",
+            status="unknown_mode",
+            details={
+                "reason": "selection_unknown_mode",
+                "mode": mode,
+                "question_preview": (q or "")[:200],
+                "debug_meta": dmeta,
+            },
+        )
         return _service_reply(no_candidates_response(), sid, q)
 
     except Exception as e:
         logger.exception("ask_failed", extra={"q": q, "err": str(e)})
+        emit_bot_event(
+            logger,
+            "ask_failed",
+            status="error",
+            details={"error": str(e)[:500], "question_preview": (q or "")[:200]},
+        )
         return safe_jsonify(internal_error_response()), 200
 
 
@@ -1008,7 +1201,15 @@ def _sse_service_reply(
     if track_user and q:
         mem_add_user(sid, q)
     answer = (payload.get("answer") or "").strip()
-    out = finalize_ask(payload, sid, q, doc_id=doc_id)
+    turn_meta = None
+    if track_user and (q or "").strip():
+        qs = (q or "").strip()
+        turn_meta = {
+            "interaction": "user_message",
+            "question_len": len(qs),
+            "preview": qs[:120],
+        }
+    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta)
     if answer:
         mem_add_bot(sid, answer)
 
@@ -1069,6 +1270,7 @@ def ask_stream():
             mem_reset(sid)
             return safe_jsonify(reset_session_response(sid))
         q, truncated = _normalize_question_text(q_raw)
+        _bind_chat_ctx(sid, client_id)
         if truncated:
             log_json(logger, "input_truncated", sid=sid, client_id=client_id, original_len=len((q_raw or "").strip()), max_len=INPUT_MAX_CHARS)
         ip = _resolve_request_ip()
@@ -1324,9 +1526,33 @@ def ask_stream():
         dmeta = selection.get("debug_meta") or {}
         if mode == "no_candidates":
             log_json(logger, "No candidates found", question=q[:50])
+            emit_bot_event(
+                logger,
+                "retrieval_fallback",
+                status="no_candidates",
+                details={
+                    "reason": "no_candidates",
+                    "question_preview": (q or "")[:200],
+                    "top_score": dmeta.get("top_score"),
+                },
+            )
             return _sse_service_reply(no_candidates_response(), sid, q)
         if mode == "low_score":
             log_json(logger, "low_score_fallback", **dmeta)
+            emit_bot_event(
+                logger,
+                "retrieval_fallback",
+                status="low_score",
+                details={
+                    "reason": "low_score",
+                    "question_preview": (q or "")[:200],
+                    "top_score": dmeta.get("top_score"),
+                    "threshold": dmeta.get("threshold"),
+                    "alias_score": dmeta.get("alias_score"),
+                    "top_candidate": dmeta.get("top_candidate"),
+                    "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
+                },
+            )
             st_ls = mem_get(sid)
             pls = low_score_response(sid, client_id)
             pls = _apply_response_policy_compat(
@@ -1340,6 +1566,16 @@ def ask_stream():
             final_chunk = selection.get("chunk")
             if not isinstance(final_chunk, dict):
                 log_json(logger, "selection_invalid_chunk", debug_meta=dmeta)
+                emit_bot_event(
+                    logger,
+                    "retrieval_fallback",
+                    status="invalid_chunk",
+                    details={
+                        "reason": "selection_invalid_chunk",
+                        "question_preview": (q or "")[:200],
+                        "debug_meta": dmeta,
+                    },
+                )
                 return _sse_service_reply(no_candidates_response(), sid, q)
             if dmeta.get("selected_by") == "alias":
                 log_json(
@@ -1358,10 +1594,27 @@ def ask_stream():
             )
             return _sse_chunk_response(final_chunk, q, sid, client_id)
         log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
+        emit_bot_event(
+            logger,
+            "retrieval_fallback",
+            status="unknown_mode",
+            details={
+                "reason": "selection_unknown_mode",
+                "mode": mode,
+                "question_preview": (q or "")[:200],
+                "debug_meta": dmeta,
+            },
+        )
         return _sse_service_reply(no_candidates_response(), sid, q)
 
     except Exception as e:
         logger.exception("ask_stream_failed", extra={"q": q, "err": str(e)})
+        emit_bot_event(
+            logger,
+            "ask_stream_failed",
+            status="error",
+            details={"error": str(e)[:500], "question_preview": (q or "")[:200]},
+        )
         return safe_jsonify(internal_error_response()), 200
 
 
@@ -1420,6 +1673,8 @@ def create_lead():
     if client_id is None:
         return jsonify({"ok": False, "error_code": "unknown_client", "delivery": None}), 403
     data["client_id"] = client_id
+    sid = sid_from_body(data)
+    _bind_chat_ctx(sid, client_id)
     payload, status = handle_lead(data)
     return jsonify(payload), status
 
