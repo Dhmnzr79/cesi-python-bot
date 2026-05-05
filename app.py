@@ -33,6 +33,7 @@ from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_con
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
+from content_arbiter import collect_content_candidates, select_content_route
 from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
@@ -503,6 +504,39 @@ def _infer_route(payload: dict) -> str:
     if intent == "offtopic":
         return "offtopic"
     return "retrieval_chunk"
+
+
+def _slim_content_arbiter_details(details: dict) -> dict:
+    """Remove large/PII-ish fields from arbiter telemetry (P0).
+
+    - Never store full chunk `text` inside bot_event.details.
+    """
+    if not isinstance(details, dict):
+        return {}
+    out = dict(details)
+    cands = out.get("candidates")
+    if isinstance(cands, dict):
+        c2 = dict(cands)
+        ret = c2.get("retrieval_candidate")
+        if isinstance(ret, dict):
+            r2 = dict(ret)
+            # drop full chunk if present
+            r2.pop("chunk", None)
+            c2["retrieval_candidate"] = r2
+        alias_c = c2.get("alias_candidate")
+        if isinstance(alias_c, dict):
+            a2 = dict(alias_c)
+            leader = a2.get("leader")
+            if isinstance(leader, dict):
+                # Ensure no heavy fields (text) ever leak into telemetry
+                leader2 = dict(leader)
+                leader2.pop("text", None)
+                a2["leader"] = leader2
+            # Full alias leader chunk must never be logged.
+            a2.pop("leader_chunk", None)
+            c2["alias_candidate"] = a2
+        out["candidates"] = c2
+    return out
 
 
 def finalize_ask(
@@ -1080,12 +1114,30 @@ def ask():
                 return _service_reply(payload, sid, q, route="price_lookup")
 
         if intent == "content":
-            cat = select_catalog_content_route(q, client_id=client_id)
-            if cat.get("mode") == "md_first":
+            cands = collect_content_candidates(q=q, sid=sid, client_id=client_id)
+            sel = select_content_route(q=q, sid=sid, client_id=client_id, candidates=cands)
+            emit_bot_event(
+                logger,
+                "content_arbiter_selected",
+                status="ok",
+                details=_slim_content_arbiter_details({
+                    "selected_kind": sel.kind,
+                    "selected_route": sel.selected_route,
+                    "selected_doc_id": sel.selected_doc_id,
+                    "reason": sel.reason,
+                    "debug_meta": sel.debug_meta,
+                    "candidates": sel.candidates,
+                    "rejected_candidates": sel.rejected_candidates,
+                }),
+            )
+
+            if sel.selected_route == "catalog_md_first":
+                cat = cands.catalog
                 sid_svc = str(cat.get("matched_service_id") or "")
                 md_ref = _with_default_anchor(str(cat.get("md_entry_ref") or ""))
                 service = cat.get("service") or {}
                 price_line = _service_price_line_for_content(service, client_id)
+                price_applied = False
                 if md_ref:
                     ch = get_chunk_by_ref(md_ref, client_id=client_id)
                     if ch:
@@ -1102,6 +1154,18 @@ def ask():
                         llm_q = q or f"Информация из {md_ref}"
                         if price_line:
                             llm_q = f"{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}"
+                            price_applied = True
+                        emit_bot_event(
+                            logger,
+                            "content_arbiter_price_injection",
+                            status="ok",
+                            details={
+                                "selected_route": "catalog_md_first",
+                                "price_line_applied": bool(price_applied),
+                                "md_entry_ref": md_ref,
+                                "matched_service_id": sid_svc,
+                            },
+                        )
                         return respond_from_chunk(
                             chunk=ch,
                             q=q,
@@ -1112,9 +1176,11 @@ def ask():
                             logger=logger,
                             llm_question=llm_q,
                             log_event="Answer generated from md_entry_ref",
-                            route="retrieval_chunk",
+                            route="catalog_md_first",
                         )
-            if cat.get("mode") == "facts":
+
+            if sel.selected_route == "catalog_facts":
+                cat = cands.catalog
                 svc = cat.get("service") or {}
                 sid_svc = str(cat.get("matched_service_id") or "")
                 payload = build_service_facts_card_payload(
@@ -1126,10 +1192,12 @@ def ask():
                     user_question=q,
                 )
                 price_line = _service_price_line_for_content(svc, client_id)
+                price_applied = False
                 if price_line:
                     base = (payload.get("answer") or "").strip()
                     payload["answer"] = f"{base}\n\n{price_line}" if base else price_line
                     payload.setdefault("meta", {})["price_display_applied"] = "always"
+                    price_applied = True
                 log_json(
                     logger,
                     "catalog_route",
@@ -1139,7 +1207,100 @@ def ask():
                 )
                 if sid_svc:
                     set_last_catalog_service(sid, sid_svc)
+                emit_bot_event(
+                    logger,
+                    "content_arbiter_price_injection",
+                    status="ok",
+                    details={
+                        "selected_route": "catalog_facts",
+                        "price_line_applied": bool(price_applied),
+                        "matched_service_id": sid_svc,
+                    },
+                )
                 return _service_reply(payload, sid, q, doc_id=None, route="catalog_facts")
+
+            if sel.selected_route == "guided":
+                guided = _service_payload(
+                    "Понял. Могу коротко подсказать и помочь выбрать направление — что для вас важнее?",
+                    sid,
+                    client_id,
+                    quick_replies=[
+                        {"label": "Стоимость", "ref": "implantation__pricing__implants.md#korotko"},
+                        {"label": "Больно ли", "ref": "implantation__faq__pain.md#korotko"},
+                        {"label": "Сроки", "ref": "implantation__faq__duration.md#korotko"},
+                        {"label": "Подходит ли мне", "ref": "implantation__info__contraindications.md#korotko"},
+                        {"label": "Записаться", "ref": "clinic__info__consultation.md#korotko"},
+                    ],
+                    cta={"text": "Записаться", "action": "lead"},
+                )
+                return _service_reply(guided, sid, q, doc_id=None, route="guided")
+
+            if sel.selected_route == "retrieval_chunk" and isinstance(sel.selected_chunk, dict):
+                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
+                _log_selection(
+                    q=q,
+                    chosen_chunk=sel.selected_chunk,
+                    chosen_score=sel.selected_chunk.get("_score"),
+                    original_top_score=dmeta.get("top_score"),
+                    rerank_applied=bool((cands.retrieval or {}).get("rerank_applied")),
+                )
+                return respond_from_chunk(
+                    chunk=sel.selected_chunk,
+                    q=q,
+                    sid=sid,
+                    client_id=client_id,
+                    finalize_ask=finalize_ask,
+                    safe_jsonify=safe_jsonify,
+                    logger=logger,
+                    route="retrieval_chunk",
+                )
+
+            # If retrieval was executed but yielded no chunk, handle it here to avoid a second retrieval.
+            rmode = str((cands.retrieval or {}).get("mode") or "")
+            if rmode == "no_candidates":
+                emit_bot_event(
+                    logger,
+                    "retrieval_fallback",
+                    status="no_candidates",
+                    details={
+                        "reason": "no_candidates",
+                        "question_preview": (q or "")[:200],
+                        "top_score": ((cands.retrieval or {}).get("debug_meta") or {}).get("top_score"),
+                    },
+                )
+                return _service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
+            if rmode == "low_score":
+                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
+                emit_bot_event(
+                    logger,
+                    "retrieval_fallback",
+                    status="low_score",
+                    details={
+                        "reason": "low_score",
+                        "question_preview": (q or "")[:200],
+                        "top_score": dmeta.get("top_score"),
+                        "threshold": dmeta.get("threshold"),
+                        "alias_score": dmeta.get("alias_score"),
+                        "top_candidate": dmeta.get("top_candidate"),
+                        "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
+                    },
+                )
+                st_ls = mem_get(sid)
+                pls = low_score_response(sid, client_id)
+                pls = _apply_response_policy_compat(
+                    pls,
+                    st_ls,
+                    q,
+                    topic_state={},
+                    doc_meta={},
+                    pre_doc_turn_count=None,
+                    session_id=sid,
+                    client_id=client_id,
+                )
+                return _service_reply(pls, sid, q, route="low_score_fallback")
+
+            # As a safe fallback for content, do not run a second retrieval.
+            return _service_reply(no_candidates_response(), sid, q, route="error")
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
         selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
@@ -1577,12 +1738,30 @@ def ask_stream():
                 return _sse_service_reply(payload, sid, q, route="price_lookup")
 
         if intent == "content":
-            cat = select_catalog_content_route(q, client_id=client_id)
-            if cat.get("mode") == "md_first":
+            cands = collect_content_candidates(q=q, sid=sid, client_id=client_id)
+            sel = select_content_route(q=q, sid=sid, client_id=client_id, candidates=cands)
+            emit_bot_event(
+                logger,
+                "content_arbiter_selected",
+                status="ok",
+                details=_slim_content_arbiter_details({
+                    "selected_kind": sel.kind,
+                    "selected_route": sel.selected_route,
+                    "selected_doc_id": sel.selected_doc_id,
+                    "reason": sel.reason,
+                    "debug_meta": sel.debug_meta,
+                    "candidates": sel.candidates,
+                    "rejected_candidates": sel.rejected_candidates,
+                }),
+            )
+
+            if sel.selected_route == "catalog_md_first":
+                cat = cands.catalog
                 sid_svc = str(cat.get("matched_service_id") or "")
                 md_ref = _with_default_anchor(str(cat.get("md_entry_ref") or ""))
                 service = cat.get("service") or {}
                 price_line = _service_price_line_for_content(service, client_id)
+                price_applied = False
                 if md_ref:
                     ch = get_chunk_by_ref(md_ref, client_id=client_id)
                     if ch:
@@ -1599,31 +1778,145 @@ def ask_stream():
                         llm_q = q or f"Информация из {md_ref}"
                         if price_line:
                             llm_q = f"{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}"
+                            price_applied = True
+                        emit_bot_event(
+                            logger,
+                            "content_arbiter_price_injection",
+                            status="ok",
+                            details={
+                                "selected_route": "catalog_md_first",
+                                "price_line_applied": bool(price_applied),
+                                "md_entry_ref": md_ref,
+                                "matched_service_id": sid_svc,
+                            },
+                        )
                         return _sse_chunk_response(
-                            ch, q, sid, client_id,
+                            ch,
+                            q,
+                            sid,
+                            client_id,
                             llm_question=llm_q,
                             log_event="Answer generated from md_entry_ref",
-                            route="retrieval_chunk",
+                            route="catalog_md_first",
                         )
-            if cat.get("mode") == "facts":
+
+            if sel.selected_route == "catalog_facts":
+                cat = cands.catalog
                 svc = cat.get("service") or {}
                 sid_svc = str(cat.get("matched_service_id") or "")
                 payload = build_service_facts_card_payload(
-                    sid=sid, client_id=client_id,
-                    service_id=sid_svc, service=svc,
+                    sid=sid,
+                    client_id=client_id,
+                    service_id=sid_svc,
+                    service=svc,
                     match_score=float(cat.get("match_score") or 0.0),
                     user_question=q,
                 )
                 price_line = _service_price_line_for_content(svc, client_id)
+                price_applied = False
                 if price_line:
                     base = (payload.get("answer") or "").strip()
                     payload["answer"] = f"{base}\n\n{price_line}" if base else price_line
                     payload.setdefault("meta", {})["price_display_applied"] = "always"
-                log_json(logger, "catalog_route", route="facts",
-                         matched_service_id=sid_svc, match_score=cat.get("match_score"))
+                    price_applied = True
+                log_json(
+                    logger,
+                    "catalog_route",
+                    route="facts",
+                    matched_service_id=sid_svc,
+                    match_score=cat.get("match_score"),
+                )
                 if sid_svc:
                     set_last_catalog_service(sid, sid_svc)
+                emit_bot_event(
+                    logger,
+                    "content_arbiter_price_injection",
+                    status="ok",
+                    details={
+                        "selected_route": "catalog_facts",
+                        "price_line_applied": bool(price_applied),
+                        "matched_service_id": sid_svc,
+                    },
+                )
                 return _sse_service_reply(payload, sid, q, doc_id=None, route="catalog_facts")
+
+            if sel.selected_route == "guided":
+                guided = _service_payload(
+                    "Понял. Могу коротко подсказать и помочь выбрать направление — что для вас важнее?",
+                    sid,
+                    client_id,
+                    quick_replies=[
+                        {"label": "Стоимость", "ref": "implantation__pricing__implants.md#korotko"},
+                        {"label": "Больно ли", "ref": "implantation__faq__pain.md#korotko"},
+                        {"label": "Сроки", "ref": "implantation__faq__duration.md#korotko"},
+                        {"label": "Подходит ли мне", "ref": "implantation__info__contraindications.md#korotko"},
+                        {"label": "Записаться", "ref": "clinic__info__consultation.md#korotko"},
+                    ],
+                    cta={"text": "Записаться", "action": "lead"},
+                )
+                return _sse_service_reply(guided, sid, q, doc_id=None, route="guided")
+
+            if sel.selected_route == "retrieval_chunk" and isinstance(sel.selected_chunk, dict):
+                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
+                _log_selection(
+                    q=q,
+                    chosen_chunk=sel.selected_chunk,
+                    chosen_score=sel.selected_chunk.get("_score"),
+                    original_top_score=dmeta.get("top_score"),
+                    rerank_applied=bool((cands.retrieval or {}).get("rerank_applied")),
+                )
+                return _sse_chunk_response(
+                    sel.selected_chunk,
+                    q,
+                    sid,
+                    client_id,
+                    route="retrieval_chunk",
+                )
+
+            rmode = str((cands.retrieval or {}).get("mode") or "")
+            if rmode == "no_candidates":
+                emit_bot_event(
+                    logger,
+                    "retrieval_fallback",
+                    status="no_candidates",
+                    details={
+                        "reason": "no_candidates",
+                        "question_preview": (q or "")[:200],
+                        "top_score": ((cands.retrieval or {}).get("debug_meta") or {}).get("top_score"),
+                    },
+                )
+                return _sse_service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
+            if rmode == "low_score":
+                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
+                emit_bot_event(
+                    logger,
+                    "retrieval_fallback",
+                    status="low_score",
+                    details={
+                        "reason": "low_score",
+                        "question_preview": (q or "")[:200],
+                        "top_score": dmeta.get("top_score"),
+                        "threshold": dmeta.get("threshold"),
+                        "alias_score": dmeta.get("alias_score"),
+                        "top_candidate": dmeta.get("top_candidate"),
+                        "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
+                    },
+                )
+                st_ls = mem_get(sid)
+                pls = low_score_response(sid, client_id)
+                pls = _apply_response_policy_compat(
+                    pls,
+                    st_ls,
+                    q,
+                    topic_state={},
+                    doc_meta={},
+                    pre_doc_turn_count=None,
+                    session_id=sid,
+                    client_id=client_id,
+                )
+                return _sse_service_reply(pls, sid, q, route="low_score_fallback")
+
+            return _sse_service_reply(no_candidates_response(), sid, q, route="error")
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
         selection = select_chunk_for_question(q, client_id=client_id, sid=sid)

@@ -23,8 +23,10 @@ from config import (
     QUERY_REWRITE_VALIDATE_OVERLAP,
     REWRITE_REJECT_SUBSTRINGS,
     SAFETY_CLASSIFY_MODEL,
+    SAFETY_RED_CONFIDENCE_THRESHOLD,
 )
 from logging_setup import get_logger, log_json, log_llm_error, log_llm_stream_usage, log_llm_usage
+from meta_loader import get_doc_meta, get_doc_path
 from session import (
     is_first_in_topic,
     mem_context,
@@ -108,11 +110,60 @@ def rewrite_query_for_retrieval(
     hist = list(st.get("hist") or [])
     if not hist:
         return q0
+
+    def _h2_title_for_doc(doc_id: str) -> str | None:
+        if not doc_id:
+            return None
+        name = f"{doc_id}.md"
+        path = get_doc_path(name, client_id=client_id) or get_doc_path(name)
+        if not path:
+            return None
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                txt = f.read()
+        except OSError:
+            return None
+        m = re.search(r"^##\s+(.+?)\s*(?:\{\#.*?\})?\s*$", txt, flags=re.M)
+        return m.group(1).strip() if m else None
+
+    def _service_title_from_catalog(service_id: str) -> str | None:
+        if not service_id:
+            return None
+        cid = (client_id or os.getenv("DEFAULT_CLIENT_ID") or "default").strip() or "default"
+        path = os.path.join(os.path.dirname(__file__), "clients", cid, "service_catalog.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+        except Exception:
+            return None
+        svc = catalog.get(service_id) if isinstance(catalog, dict) else None
+        if isinstance(svc, dict):
+            t = str(svc.get("title") or "").strip()
+            return t or None
+        return None
+
+    current_doc_id = str(st.get("current_doc_id") or "").strip()
+    last_service_id = str(st.get("last_catalog_service_id") or "").strip()
+    topic_bits: list[str] = []
+    if current_doc_id:
+        fm = get_doc_meta(f"{current_doc_id}.md", client_id=client_id) or {}
+        h2_title = _h2_title_for_doc(current_doc_id)
+        topic_label = h2_title or str(fm.get("doc_id") or current_doc_id).replace("_", " ")
+        topic_label = str(topic_label).strip()
+        if topic_label:
+            topic_bits.append(topic_label)
+    if last_service_id:
+        stitle = _service_title_from_catalog(last_service_id)
+        if stitle:
+            topic_bits.append(stitle)
+    topic_line = f"Текущая обсуждаемая тема: {' / '.join(topic_bits[:2])}\n\n" if topic_bits else ""
+
     tail = hist[-QUERY_REWRITE_MAX_MESSAGES:]
     dialog_lines = [f"{m.get('role', '?')}: {m.get('content', '')}" for m in tail]
     dialog_block = "\n".join(dialog_lines)
     user_block = (
-        "Последние реплики диалога:\n"
+        topic_line
+        + "Последние реплики диалога:\n"
         f"{dialog_block}\n\n"
         "Текущий вопрос пациента:\n"
         f"{q0}"
@@ -775,6 +826,41 @@ _HANDOFF_FILTER_SYSTEM = (
 )
 
 
+# P1: minimal handoff gate without over-classification.
+# We only handoff:
+# - explicit red medical states (bleeding, pus, high fever, severe swelling/breathing issues, trauma, urgent meds dosing)
+# - explicit complaint/management contact or legal conflict
+# - explicit spam/trolling/profanity without a clinic question
+_HANDOFF_RED_HINT_RE = re.compile(
+    r"(?:"
+    r"кровотеч|кровь\s+не\s+(?:останавлива|остановит)|сильн\w*\s+кров"
+    r"|гной|гнойн"
+    r"|температур\w*|жар|лихорад"
+    r"|отек\w*|отёк\w*|опухл\w*"
+    r"|трудно\s+(?:дышать|глотать)"
+    r"|травм\w*|удар\w*\s+(?:в\s+лицо|челюст|зуб)"
+    r"|антибиотик|дозировк|назнач(?:ьте|ь)\s+лекарств|схем\w*\s+лечени"
+    r"|срочн\w*"
+    r")",
+    re.I | re.U,
+)
+_HANDOFF_COMPLAINT_HINT_RE = re.compile(
+    r"(?:"
+    r"жалоб\w*|претенз\w*|конфликт\w*"
+    r"|директор\w*|главврач\w*|руководств\w*"
+    r"|суд\w*|иск\w*|прокуратур\w*|роспотребнадзор\w*"
+    r")",
+    re.I | re.U,
+)
+_HANDOFF_SPAM_HINT_RE = re.compile(
+    r"(?:"
+    r"\bсука\b|\bбля\b|\bхуй\b|\bпизд\b|\bеба\w*\b|\bиди\s+на\b"
+    r"|пошел\s+на\b|пошёл\s+на\b"
+    r")",
+    re.I | re.U,
+)
+
+
 def classify_handoff_filter(user_message: str, *, client_id: str | None, sid: str) -> dict:
     msg = (user_message or "").strip()
     if len(msg) < 2:
@@ -783,6 +869,31 @@ def classify_handoff_filter(user_message: str, *, client_id: str | None, sid: st
             "reason": "empty_or_short",
             "confidence": 0.0,
         }
+    # Deterministic allow-by-default.
+    # Most sales/clinic questions (including fear/concern) must NOT be handoff'ed.
+    mlow = msg.lower()
+    if _HANDOFF_COMPLAINT_HINT_RE.search(mlow):
+        # use existing complaint classifier only for likely complaints to avoid over-triggering
+        cc = classify_complaint_request(msg, client_id=client_id, sid=sid)
+        if str(cc.get("label") or "").lower() == "complaint_or_management_contact" and float(
+            cc.get("confidence") or 0.0
+        ) >= 0.7:
+            return {"label": "handoff", "reason": "complaint_or_management", "confidence": float(cc.get("confidence") or 0.7)}
+        return {"label": "sales_or_clinic_question", "reason": "complaint_low_confidence", "confidence": float(cc.get("confidence") or 0.0)}
+    if _HANDOFF_RED_HINT_RE.search(mlow):
+        sc = classify_safety(msg, client_id=client_id, sid=sid)
+        if str(sc.get("label") or "").lower() == "red" and float(sc.get("confidence") or 0.0) >= float(
+            SAFETY_RED_CONFIDENCE_THRESHOLD
+        ):
+            return {"label": "handoff", "reason": "safety_red", "confidence": float(sc.get("confidence") or 0.8)}
+        return {"label": "sales_or_clinic_question", "reason": "safety_not_red", "confidence": float(sc.get("confidence") or 0.0)}
+    if _HANDOFF_SPAM_HINT_RE.search(mlow):
+        return {"label": "handoff", "reason": "spam_or_profanity", "confidence": 1.0}
+
+    # If nothing looks like a red/complaint/spam case, do not spend LLM tokens here.
+    # (P1: minimal safety/complaint without over-complication.)
+    return {"label": "sales_or_clinic_question", "reason": "default_allow", "confidence": 0.0}
+
     try:
         resp = client.chat.completions.create(
             model=CHAT_MODEL,

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Admin Dashboard</h1>
+    <div class="controls">
+      <label>client_id
+        <input id="clientId" type="text" value="default">
+      </label>
+      <button id="refreshBtn" type="button">Обновить</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card wide">
+      <h2>Обзор (сегодня)</h2>
+      <div id="overview" class="kpi-grid">
+        <div class="kpi"><span class="kpi-label">Загрузка...</span><span class="kpi-value">...</span></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Стоимость LLM (сегодня)</h2>
+      <div id="costs"></div>
+    </section>
+    <section class="card">
+      <h2>Диалоги (последние)</h2>
+      <div id="dialogs"></div>
+    </section>
+    <section class="card">
+      <h2>Проблемы</h2>
+      <div id="problems"></div>
+    </section>
+    <section class="card">
+      <h2>Лиды</h2>
+      <div id="leads"></div>
+    </section>
+    <section class="card wide dev-card">
+      <details>
+        <summary>Developer Mode: Event Explorer</summary>
+        <div class="event-filters">
+          <label>event_type <input id="eventTypeFilter" type="text" placeholder="turn_complete"></label>
+          <label>sid <input id="sidFilter" type="text" placeholder="insp_..."></label>
+          <label>request_id <input id="requestIdFilter" type="text" placeholder="uuid"></label>
+        </div>
+        <pre id="events">hidden</pre>
+      </details>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
+

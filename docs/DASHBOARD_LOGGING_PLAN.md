@@ -249,7 +249,34 @@ JSONL остается источником отладки и резервом. 
 
 ---
 
-## 12) Definition of Done (MVP)
+## 12) Этап 3: отдельный admin-сервис (MVP UI)
+
+Реализация в репозитории: `admin_dashboard/`.
+
+Содержимое:
+
+- `admin_dashboard/app.py` — отдельный Flask сервис админки (read-only к PostgreSQL).
+- `admin_dashboard/templates/index.html` — единый экран MVP.
+- `admin_dashboard/static/dashboard.css` / `dashboard.js` — базовый UI и загрузка API.
+
+API сервиса:
+
+- `GET /api/overview`
+- `GET /api/dialogs`
+- `GET /api/problems`
+- `GET /api/leads`
+- `GET /api/costs`
+- `GET /api/events`
+
+Параметры запуска:
+
+- `BOT_PG_DSN` — обязателен для API данных.
+- `ADMIN_DASHBOARD_PORT` (по умолчанию `9100`).
+- `ADMIN_DASHBOARD_TOKEN` (обязателен только в `APP_ENV=prod`).
+
+---
+
+## 13) Definition of Done (MVP)
 
 MVP считается готовым, если:
 
