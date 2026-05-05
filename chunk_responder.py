@@ -20,6 +20,8 @@ from session import (
     mark_situation_offered,
     mark_video_pending,
     mark_video_shown,
+    mem_add_bot,
+    mem_add_user,
     mem_get,
     pop_deferred_ref,
     set_cta_shown,
@@ -135,7 +137,10 @@ def respond_from_chunk(
     logger,
     llm_question: str | None = None,
     log_event: str = "Answer generated",
+    route: str = "retrieval_chunk",
 ):
+    if (q or "").strip():
+        mem_add_user(sid, q)
     meta = meta_for_chunk(chunk, client_id=client_id)
     doc_id = meta.get("doc_id")
     if doc_id:
@@ -222,9 +227,10 @@ def respond_from_chunk(
         if qs
         else None
     )
-    return safe_jsonify(
-        finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta),
-    )
+    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta, route=route)
+    if answer.strip():
+        mem_add_bot(sid, answer)
+    return safe_jsonify(out)
 
 
 def respond_from_chunk_stream(
@@ -237,12 +243,15 @@ def respond_from_chunk_stream(
     logger,
     llm_question: str | None = None,
     log_event: str = "Answer generated",
+    route: str = "retrieval_chunk",
 ):
     """Generator yielding SSE strings: text_delta → ui → done.
 
     Используй с Flask: Response(respond_from_chunk_stream(...), mimetype='text/event-stream')
     Полностью зеркалит respond_from_chunk, но стримит токены ответа.
     """
+    if (q or "").strip():
+        mem_add_user(sid, q)
     meta = meta_for_chunk(chunk, client_id=client_id)
     doc_id = meta.get("doc_id")
     if doc_id:
@@ -343,7 +352,9 @@ def respond_from_chunk_stream(
         if qs
         else None
     )
-    final = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta)
+    final = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta, route=route)
+    if answer.strip():
+        mem_add_bot(sid, answer)
     yield f"event: ui\ndata: {_json.dumps(final, ensure_ascii=False, default=_sse_default)}\n\n"
     yield "event: done\ndata: {}\n\n"
 

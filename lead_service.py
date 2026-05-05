@@ -7,6 +7,7 @@ from email.message import EmailMessage
 from uuid import uuid4
 
 from logging_setup import emit_bot_event, get_logger, log_json
+from pg_sink import enqueue_lead
 from session import normalize_phone
 
 logger = get_logger("bot")
@@ -72,6 +73,7 @@ def handle_lead(data: dict) -> tuple[dict, int]:
     intent = (data.get("intent") or "").strip()
     sid = (data.get("sid") or "").strip()
     client_id = (data.get("client_id") or "").strip()
+    request_id = (data.get("request_id") or "").strip() or None
     situation_note = (data.get("situation_note") or "").strip()
 
     if not phone:
@@ -98,6 +100,20 @@ def handle_lead(data: dict) -> tuple[dict, int]:
 
     sent, send_err = _send_lead_email(rec)
     if sent:
+        enqueue_lead(
+            {
+                "captured_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+                "request_id": request_id,
+                "sid": sid,
+                "client_id": client_id,
+                "name": name or None,
+                "phone": phone or None,
+                "topic": intent or None,
+                "cta_action": "lead",
+                "turns_to_lead": None,
+                "delivery_status": "email",
+            }
+        )
         emit_bot_event(
             logger,
             "lead_submitted",
@@ -122,6 +138,20 @@ def handle_lead(data: dict) -> tuple[dict, int]:
             client_id=client_id,
             sid=sid,
             error_code=send_err or "email_send_failed",
+        )
+        enqueue_lead(
+            {
+                "captured_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+                "request_id": request_id,
+                "sid": sid,
+                "client_id": client_id,
+                "name": name or None,
+                "phone": phone or None,
+                "topic": intent or None,
+                "cta_action": "lead",
+                "turns_to_lead": None,
+                "delivery_status": "file_fallback",
+            }
         )
         emit_bot_event(
             logger,

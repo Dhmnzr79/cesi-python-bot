@@ -70,7 +70,7 @@ SQLite session state. Хранит `current_doc_id`, `last_catalog_service_id`, 
 Email-доставка лида. При ошибке — file fallback (`leads/*.json`).
 
 ### `logging_setup.py`
-JSONL-логирование. Маскирование PII (phone), санитизация секретов. Продуктовые события с `kind="bot_event"` и `schema_version` (см. эмиттер `emit_bot_event`): `user_turn_completed`, `bot_reply_completed`, `cta_shown`, `lead_submitted`, `retrieval_selected`, `retrieval_fallback`, `llm_usage`, `llm_error`; в HTTP-контексте в лог подставляются `request_id`, `sid`, `client_id`, `path`. Оценка USD в `llm_usage` — опционально через `BOT_LLM_USD_PER_1M_PROMPT` / `BOT_LLM_USD_PER_1M_COMPLETION` в `.env`.
+JSONL-логирование. Маскирование PII (phone), санитизация секретов. Продуктовые события с `kind="bot_event"` и `schema_version` (см. эмиттер `emit_bot_event`): `user_turn_completed`, `bot_reply_completed`, `turn_complete`, `cta_shown`, `lead_submitted`, `retrieval_selected`, `retrieval_fallback`, `llm_usage`, `llm_error`; в HTTP-контексте в лог подставляются `request_id`, `sid`, `client_id`, `path`. Для `turn_complete` пишутся полный `user_text`/`bot_text` (с лимитом длины), `route` и `latency_ms`. Оценка USD в `llm_usage` — опционально через `BOT_LLM_USD_PER_1M_PROMPT` / `BOT_LLM_USD_PER_1M_COMPLETION` в `.env`.
 
 ---
 

@@ -8,8 +8,9 @@ import threading
 from collections import deque
 import numpy as np
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, stream_with_context
 import session as session_mod
+from pg_sink import init_pg_sink
 
 from config import (
     ALIAS_STRONG_THRESHOLD,
@@ -28,7 +29,7 @@ from config import (
     resolve_client_id,
 )
 from lead_service import handle_lead
-from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_context, log_json
+from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_context, log_json, redact_text
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
@@ -78,6 +79,7 @@ app = Flask(__name__, static_folder="static")
 logger = get_logger("bot")
 APP_ENV = (os.getenv("APP_ENV") or "local").strip().lower()
 _APPLY_POLICY_PARAMS = inspect.signature(apply_response_policy).parameters
+init_pg_sink(logger)
 TXT = {
     "lead_name_prompt": "Отлично. Как к вам можно обращаться?",
     "lead_name_retry": "Как к вам можно обращаться? Напишите, пожалуйста, имя.",
@@ -150,6 +152,7 @@ def _service_reply(
     *,
     doc_id: str | None = None,
     track_user: bool = True,
+    route: str | None = None,
 ):
     if track_user and q:
         mem_add_user(sid, q)
@@ -162,7 +165,7 @@ def _service_reply(
             "question_len": len(qs),
             "preview": qs[:120],
         }
-    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta)
+    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta, route=route)
     if answer:
         mem_add_bot(sid, answer)
     return safe_jsonify(out)
@@ -479,6 +482,29 @@ def _bind_chat_ctx(sid: str, client_id: str) -> None:
     bind_client_id(sid, client_id)
 
 
+def _set_route(route: str | None) -> None:
+    if route:
+        request.ctx["route"] = str(route).strip()
+
+
+def _infer_route(payload: dict) -> str:
+    meta = payload.get("meta") or {}
+    if meta.get("error") == "rate_limited":
+        return "rate_limited"
+    if bool(meta.get("low_score")):
+        return "low_score_fallback"
+    if bool(meta.get("lead_flow")):
+        return "lead_flow"
+    if bool(meta.get("handoff_filter")):
+        return "handoff_filter"
+    intent = str(meta.get("intent") or "").strip().lower()
+    if intent == "catalog_facts":
+        return "catalog_facts"
+    if intent == "offtopic":
+        return "offtopic"
+    return "retrieval_chunk"
+
+
 def finalize_ask(
     payload: dict,
     sid: str,
@@ -486,6 +512,7 @@ def finalize_ask(
     *,
     doc_id: str | None = None,
     turn_meta: dict | None = None,
+    route: str | None = None,
 ) -> dict:
     record_last_bot_payload(sid, payload)
     st = mem_get(sid)
@@ -500,21 +527,53 @@ def finalize_ask(
 
     if turn_meta and turn_meta.get("interaction") == "user_message":
         emit_bot_event(logger, "user_turn_completed", status="ok", details=turn_meta)
+    effective_route = str(route or request.ctx.get("route") or _infer_route(payload))
+    request.ctx["route"] = effective_route
     pmeta = payload.get("meta") or {}
+    answer_text = str(payload.get("answer") or "")
+    user_text_redacted = redact_text((q or ""), max_len=8000)
+    user_preview_redacted = redact_text((q or ""), max_len=200)
+    bot_text_redacted = redact_text(answer_text, max_len=8000)
     emit_bot_event(
         logger,
         "bot_reply_completed",
         status="ok",
         details={
-            "answer_chars": len(str(payload.get("answer") or "")),
+            "answer_chars": len(answer_text),
             "doc_id": doc_id or pmeta.get("doc_id"),
             "low_score": bool(pmeta.get("low_score")),
             "handoff_filter": bool(pmeta.get("handoff_filter")),
             "lead_flow": bool(pmeta.get("lead_flow")),
             "intent": pmeta.get("intent"),
             "meta_error": pmeta.get("error"),
+            "route": effective_route,
         },
     )
+    if turn_meta and turn_meta.get("interaction") == "user_message":
+        t0 = request.ctx.get("turn_t0_monotonic")
+        lat_ms = None
+        if isinstance(t0, (int, float)):
+            lat_ms = max(0, int((time.monotonic() - float(t0)) * 1000))
+        emit_bot_event(
+            logger,
+            "turn_complete",
+            status="ok",
+            details={
+                "turn_number": int(meta.get("session_turn_count") or 0),
+                "user_text_redacted": user_text_redacted,
+                "user_preview_redacted": user_preview_redacted,
+                "bot_text_redacted": bot_text_redacted,
+                "intent": pmeta.get("intent"),
+                "doc_id": doc_id or pmeta.get("doc_id"),
+                "route": effective_route,
+                "low_score": bool(pmeta.get("low_score")),
+                "lead_flow": bool(pmeta.get("lead_flow")),
+                "handoff_filter": bool(pmeta.get("handoff_filter")),
+                "answer_chars": len(answer_text),
+                "latency_ms": lat_ms,
+                "fallback_reason": pmeta.get("fallback_reason"),
+            },
+        )
     cta = payload.get("cta")
     if isinstance(cta, dict) and (cta.get("action") or cta.get("text")):
         emit_bot_event(
@@ -739,6 +798,7 @@ def dashboard_events_api():
 @app.post("/ask")
 def ask():
     q = ""
+    request.ctx["turn_t0_monotonic"] = time.monotonic()
     try:
         data = request.get_json(force=True) or {}
         client_id = resolve_client_id(data.get("client_id"))
@@ -760,10 +820,10 @@ def ask():
         ip = _resolve_request_ip()
         if not _check_rate_limit(ip):
             log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
-            return safe_jsonify(_rate_limited_response_payload()), 429
+            return _service_reply(_rate_limited_response_payload(), sid, q, route="rate_limited"), 429
         if _is_obvious_noise(q):
             log_json(logger, "obvious_noise_short_circuit", sid=sid, client_id=client_id)
-            return _service_reply(_obvious_noise_payload(sid, client_id), sid, q)
+            return _service_reply(_obvious_noise_payload(sid, client_id), sid, q, route="noise_short_circuit")
         if q:
             hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
             label = str(hf.get("label") or "").lower()
@@ -789,6 +849,7 @@ def ask():
                     ),
                     sid,
                     q,
+                    route="handoff_filter",
                 )
 
         st = mem_get(sid)
@@ -819,19 +880,21 @@ def ask():
                         logger=logger,
                         llm_question=q or f"Информация из {redirect_ref}",
                         log_event="Answer generated from flow redirect_ref",
+                        route="flow_redirect_ref",
                     )
             return _service_reply(
                 flow_result["payload"],
                 sid,
                 q,
                 doc_id=flow_result.get("doc_id"),
+                route="lead_flow",
             )
 
         st = mem_get(sid)
         if _is_duplicate_question(st, q):
             snap = _get_last_content_ui_payload_compat(sid)
             log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
-            return _service_reply(_duplicate_payload(sid, client_id, snap), sid, q)
+            return _service_reply(_duplicate_payload(sid, client_id, snap), sid, q, route="duplicate_short_circuit")
         if _is_message_burst(st):
             set_anti_spam_redirect_shown(sid, True)
             log_json(
@@ -842,7 +905,7 @@ def ask():
                 burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC,
                 burst_messages=ANTI_SPAM_BURST_MESSAGES,
             )
-            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q)
+            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
         if _should_soft_redirect_no_intent(st):
             set_anti_spam_redirect_shown(sid, True)
             log_json(
@@ -852,7 +915,7 @@ def ask():
                 client_id=client_id,
                 session_turn_count=int(st.get("session_turn_count") or 0),
             )
-            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q)
+            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
 
         if ref:
             ch = get_chunk_by_ref(ref, client_id=client_id)
@@ -867,10 +930,11 @@ def ask():
                     logger=logger,
                     llm_question=q or f"Информация из {ref}",
                     log_event="Answer generated from ref",
+                    route="retrieval_chunk",
                 )
 
         if not q:
-            return _service_reply(empty_question_response(), sid, q, track_user=False)
+            return _service_reply(empty_question_response(), sid, q, track_user=False, route="error")
 
         # Короткие реплики без явного интента — обрабатываем через контекст сессии.
         # Предотвращает падение "да", "понятно", "хорошо" в retrieval с низким score.
@@ -889,12 +953,13 @@ def ask():
                         logger=logger,
                         llm_question=q,
                         log_event="Answer from short_contextual fallback",
+                        route="retrieval_chunk",
                     )
 
         intent = classify_intent(q, client_id=client_id, sid=sid)
 
         if intent == "offtopic":
-            return _service_reply(offtopic_response(), sid, q)
+            return _service_reply(offtopic_response(), sid, q, route="offtopic")
 
         if intent == "contacts":
             cands = retrieve(q, topk=4, client_id=client_id)
@@ -910,6 +975,7 @@ def ask():
                     logger=logger,
                     llm_question=q,
                     log_event="Answer generated from contacts intent",
+                    route="contacts_chunk",
                 )
 
         if intent in ("price_lookup", "price_concern"):
@@ -927,7 +993,7 @@ def ask():
                     fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
                 )
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _service_reply(payload, sid, q)
+                return _service_reply(payload, sid, q, route="price_lookup")
             if price_route.get("mode") == "matched":
                 intent = str(price_route.get("intent") or "other")
                 service = price_route.get("service") or {}
@@ -961,6 +1027,7 @@ def ask():
                                 logger=logger,
                                 llm_question=q,
                                 log_event="Answer generated from concern_ref",
+                                route="price_concern",
                             )
                     payload = build_price_concern_payload(
                         sid=sid,
@@ -970,7 +1037,7 @@ def ask():
                         match_score=match_score,
                     )
                     log_json(logger, "price_route", **(payload.get("meta") or {}))
-                    return _service_reply(payload, sid, q)
+                    return _service_reply(payload, sid, q, route="price_concern")
                 if route_source == "price_ref" and price_route.get("price_ref"):
                     ref = str(price_route.get("price_ref") or "").strip()
                     ch = get_chunk_by_ref(ref, client_id=client_id)
@@ -996,6 +1063,7 @@ def ask():
                             logger=logger,
                             llm_question=q or f"Цена по {ref}",
                             log_event="Answer generated from price_ref",
+                            route="price_lookup",
                         )
                 payload = build_price_lookup_payload(
                     sid=sid,
@@ -1009,7 +1077,7 @@ def ask():
                     price_item=price_route.get("price_item"),
                 )
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _service_reply(payload, sid, q)
+                return _service_reply(payload, sid, q, route="price_lookup")
 
         if intent == "content":
             cat = select_catalog_content_route(q, client_id=client_id)
@@ -1044,6 +1112,7 @@ def ask():
                             logger=logger,
                             llm_question=llm_q,
                             log_event="Answer generated from md_entry_ref",
+                            route="retrieval_chunk",
                         )
             if cat.get("mode") == "facts":
                 svc = cat.get("service") or {}
@@ -1070,7 +1139,7 @@ def ask():
                 )
                 if sid_svc:
                     set_last_catalog_service(sid, sid_svc)
-                return _service_reply(payload, sid, q, doc_id=None)
+                return _service_reply(payload, sid, q, doc_id=None, route="catalog_facts")
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
         selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
@@ -1088,7 +1157,7 @@ def ask():
                     "top_score": dmeta.get("top_score"),
                 },
             )
-            return _service_reply(no_candidates_response(), sid, q)
+            return _service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
         if mode == "low_score":
             log_json(logger, "low_score_fallback", **dmeta)
             emit_bot_event(
@@ -1117,7 +1186,7 @@ def ask():
                 session_id=sid,
                 client_id=client_id,
             )
-            return _service_reply(pls, sid, q)
+            return _service_reply(pls, sid, q, route="low_score_fallback")
         if mode == "chunk":
             final_chunk = selection.get("chunk")
             if not isinstance(final_chunk, dict):
@@ -1132,7 +1201,7 @@ def ask():
                         "debug_meta": dmeta,
                     },
                 )
-                return _service_reply(no_candidates_response(), sid, q)
+                return _service_reply(no_candidates_response(), sid, q, route="error")
             if dmeta.get("selected_by") == "alias":
                 log_json(
                     logger,
@@ -1157,6 +1226,7 @@ def ask():
                 finalize_ask=finalize_ask,
                 safe_jsonify=safe_jsonify,
                 logger=logger,
+                route="retrieval_chunk",
             )
         log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
         emit_bot_event(
@@ -1170,10 +1240,31 @@ def ask():
                 "debug_meta": dmeta,
             },
         )
-        return _service_reply(no_candidates_response(), sid, q)
+        return _service_reply(no_candidates_response(), sid, q, route="error")
 
     except Exception as e:
         logger.exception("ask_failed", extra={"q": q, "err": str(e)})
+        if request.ctx.get("sid") and (q or "").strip():
+            emit_bot_event(
+                logger,
+                "turn_complete",
+                status="error",
+                details={
+                    "turn_number": None,
+                    "user_text_redacted": redact_text((q or ""), max_len=8000),
+                    "user_preview_redacted": redact_text((q or ""), max_len=200),
+                    "bot_text_redacted": "",
+                    "intent": None,
+                    "doc_id": None,
+                    "route": "error",
+                    "low_score": False,
+                    "lead_flow": False,
+                    "handoff_filter": False,
+                    "answer_chars": 0,
+                    "latency_ms": None,
+                    "fallback_reason": "ask_failed",
+                },
+            )
         emit_bot_event(
             logger,
             "ask_failed",
@@ -1196,6 +1287,7 @@ def _sse_service_reply(
     *,
     doc_id: str | None = None,
     track_user: bool = True,
+    route: str | None = None,
 ):
     """Обёртка _service_reply для SSE: один event ui + done."""
     if track_user and q:
@@ -1209,7 +1301,7 @@ def _sse_service_reply(
             "question_len": len(qs),
             "preview": qs[:120],
         }
-    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta)
+    out = finalize_ask(payload, sid, q, doc_id=doc_id, turn_meta=turn_meta, route=route)
     if answer:
         mem_add_bot(sid, answer)
 
@@ -1228,18 +1320,22 @@ def _sse_chunk_response(
     *,
     llm_question: str | None = None,
     log_event: str = "Answer generated",
+    route: str = "retrieval_chunk",
 ):
     """Стриминговый ответ из чанка через SSE."""
     return app.response_class(
-        respond_from_chunk_stream(
-            chunk=chunk,
-            q=q,
-            sid=sid,
-            client_id=client_id,
-            finalize_ask=finalize_ask,
-            logger=logger,
-            llm_question=llm_question,
-            log_event=log_event,
+        stream_with_context(
+            respond_from_chunk_stream(
+                chunk=chunk,
+                q=q,
+                sid=sid,
+                client_id=client_id,
+                finalize_ask=finalize_ask,
+                logger=logger,
+                llm_question=llm_question,
+                log_event=log_event,
+                route=route,
+            ),
         ),
         mimetype="text/event-stream",
         headers=_SSE_HEADERS,
@@ -1255,6 +1351,7 @@ def ask_stream():
     Direct-ответы (цены, контакты, flow) отдают сразу один ui + done без text_delta.
     """
     q = ""
+    request.ctx["turn_t0_monotonic"] = time.monotonic()
     try:
         data = request.get_json(force=True) or {}
         client_id = resolve_client_id(data.get("client_id"))
@@ -1276,10 +1373,10 @@ def ask_stream():
         ip = _resolve_request_ip()
         if not _check_rate_limit(ip):
             log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
-            return safe_jsonify(_rate_limited_response_payload()), 429
+            return _sse_service_reply(_rate_limited_response_payload(), sid, q, route="rate_limited"), 429
         if _is_obvious_noise(q):
             log_json(logger, "obvious_noise_short_circuit", sid=sid, client_id=client_id)
-            return _sse_service_reply(_obvious_noise_payload(sid, client_id), sid, q)
+            return _sse_service_reply(_obvious_noise_payload(sid, client_id), sid, q, route="noise_short_circuit")
         if q:
             hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
             label = str(hf.get("label") or "").lower()
@@ -1305,6 +1402,7 @@ def ask_stream():
                     ),
                     sid,
                     q,
+                    route="handoff_filter",
                 )
 
         st = mem_get(sid)
@@ -1329,16 +1427,17 @@ def ask_stream():
                         ch, q, sid, client_id,
                         llm_question=q or f"Информация из {redirect_ref}",
                         log_event="Answer generated from flow redirect_ref",
+                        route="flow_redirect_ref",
                     )
             return _sse_service_reply(
-                flow_result["payload"], sid, q, doc_id=flow_result.get("doc_id")
+                flow_result["payload"], sid, q, doc_id=flow_result.get("doc_id"), route="lead_flow"
             )
 
         st = mem_get(sid)
         if _is_duplicate_question(st, q):
             snap = _get_last_content_ui_payload_compat(sid)
             log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
-            return _sse_service_reply(_duplicate_payload(sid, client_id, snap), sid, q)
+            return _sse_service_reply(_duplicate_payload(sid, client_id, snap), sid, q, route="duplicate_short_circuit")
         if _is_message_burst(st):
             set_anti_spam_redirect_shown(sid, True)
             log_json(
@@ -1349,7 +1448,7 @@ def ask_stream():
                 burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC,
                 burst_messages=ANTI_SPAM_BURST_MESSAGES,
             )
-            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q)
+            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
         if _should_soft_redirect_no_intent(st):
             set_anti_spam_redirect_shown(sid, True)
             log_json(
@@ -1359,7 +1458,7 @@ def ask_stream():
                 client_id=client_id,
                 session_turn_count=int(st.get("session_turn_count") or 0),
             )
-            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q)
+            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
 
         if ref:
             ch = get_chunk_by_ref(ref, client_id=client_id)
@@ -1368,10 +1467,11 @@ def ask_stream():
                     ch, q, sid, client_id,
                     llm_question=q or f"Информация из {ref}",
                     log_event="Answer generated from ref",
+                    route="retrieval_chunk",
                 )
 
         if not q:
-            return _sse_service_reply(empty_question_response(), sid, q, track_user=False)
+            return _sse_service_reply(empty_question_response(), sid, q, track_user=False, route="error")
 
         if _is_short_contextual(q, st):
             current_doc_id = (st.get("current_doc_id") or "").strip()
@@ -1381,12 +1481,13 @@ def ask_stream():
                     return _sse_chunk_response(
                         ch, q, sid, client_id,
                         log_event="Answer from short_contextual fallback",
+                        route="retrieval_chunk",
                     )
 
         intent = classify_intent(q, client_id=client_id, sid=sid)
 
         if intent == "offtopic":
-            return _sse_service_reply(offtopic_response(), sid, q)
+            return _sse_service_reply(offtopic_response(), sid, q, route="offtopic")
 
         if intent == "contacts":
             cands = retrieve(q, topk=4, client_id=client_id)
@@ -1395,6 +1496,7 @@ def ask_stream():
                 return _sse_chunk_response(
                     picked, q, sid, client_id,
                     log_event="Answer generated from contacts intent",
+                    route="contacts_chunk",
                 )
 
         if intent in ("price_lookup", "price_concern"):
@@ -1409,7 +1511,7 @@ def ask_stream():
                     fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
                 )
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _sse_service_reply(payload, sid, q)
+                return _sse_service_reply(payload, sid, q, route="price_lookup")
             if price_route.get("mode") == "matched":
                 intent = str(price_route.get("intent") or "other")
                 service = price_route.get("service") or {}
@@ -1435,13 +1537,14 @@ def ask_stream():
                             return _sse_chunk_response(
                                 ch, q, sid, client_id,
                                 log_event="Answer generated from concern_ref",
+                                route="price_concern",
                             )
                     payload = build_price_concern_payload(
                         sid=sid, client_id=client_id,
                         service_id=service_id, service=service, match_score=match_score,
                     )
                     log_json(logger, "price_route", **(payload.get("meta") or {}))
-                    return _sse_service_reply(payload, sid, q)
+                    return _sse_service_reply(payload, sid, q, route="price_concern")
                 if route_source == "price_ref" and price_route.get("price_ref"):
                     ref = str(price_route.get("price_ref") or "").strip()
                     ch = get_chunk_by_ref(ref, client_id=client_id)
@@ -1460,6 +1563,7 @@ def ask_stream():
                             ch, q, sid, client_id,
                             llm_question=q or f"Цена по {ref}",
                             log_event="Answer generated from price_ref",
+                            route="price_lookup",
                         )
                 payload = build_price_lookup_payload(
                     sid=sid, client_id=client_id,
@@ -1470,7 +1574,7 @@ def ask_stream():
                     price_item=price_route.get("price_item"),
                 )
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _sse_service_reply(payload, sid, q)
+                return _sse_service_reply(payload, sid, q, route="price_lookup")
 
         if intent == "content":
             cat = select_catalog_content_route(q, client_id=client_id)
@@ -1499,6 +1603,7 @@ def ask_stream():
                             ch, q, sid, client_id,
                             llm_question=llm_q,
                             log_event="Answer generated from md_entry_ref",
+                            route="retrieval_chunk",
                         )
             if cat.get("mode") == "facts":
                 svc = cat.get("service") or {}
@@ -1518,7 +1623,7 @@ def ask_stream():
                          matched_service_id=sid_svc, match_score=cat.get("match_score"))
                 if sid_svc:
                     set_last_catalog_service(sid, sid_svc)
-                return _sse_service_reply(payload, sid, q, doc_id=None)
+                return _sse_service_reply(payload, sid, q, doc_id=None, route="catalog_facts")
 
         log_json(logger, "Processing question", question=q[:100], question_length=len(q))
         selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
@@ -1536,7 +1641,7 @@ def ask_stream():
                     "top_score": dmeta.get("top_score"),
                 },
             )
-            return _sse_service_reply(no_candidates_response(), sid, q)
+            return _sse_service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
         if mode == "low_score":
             log_json(logger, "low_score_fallback", **dmeta)
             emit_bot_event(
@@ -1561,7 +1666,7 @@ def ask_stream():
                 pre_doc_turn_count=None,
                 session_id=sid, client_id=client_id,
             )
-            return _sse_service_reply(pls, sid, q)
+            return _sse_service_reply(pls, sid, q, route="low_score_fallback")
         if mode == "chunk":
             final_chunk = selection.get("chunk")
             if not isinstance(final_chunk, dict):
@@ -1576,7 +1681,7 @@ def ask_stream():
                         "debug_meta": dmeta,
                     },
                 )
-                return _sse_service_reply(no_candidates_response(), sid, q)
+                return _sse_service_reply(no_candidates_response(), sid, q, route="error")
             if dmeta.get("selected_by") == "alias":
                 log_json(
                     logger, "alias_hit_selected",
@@ -1592,7 +1697,7 @@ def ask_stream():
                 original_top_score=dmeta.get("top_score"),
                 rerank_applied=bool(selection.get("rerank_applied")),
             )
-            return _sse_chunk_response(final_chunk, q, sid, client_id)
+            return _sse_chunk_response(final_chunk, q, sid, client_id, route="retrieval_chunk")
         log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
         emit_bot_event(
             logger,
@@ -1605,10 +1710,31 @@ def ask_stream():
                 "debug_meta": dmeta,
             },
         )
-        return _sse_service_reply(no_candidates_response(), sid, q)
+        return _sse_service_reply(no_candidates_response(), sid, q, route="error")
 
     except Exception as e:
         logger.exception("ask_stream_failed", extra={"q": q, "err": str(e)})
+        if request.ctx.get("sid") and (q or "").strip():
+            emit_bot_event(
+                logger,
+                "turn_complete",
+                status="error",
+                details={
+                    "turn_number": None,
+                    "user_text_redacted": redact_text((q or ""), max_len=8000),
+                    "user_preview_redacted": redact_text((q or ""), max_len=200),
+                    "bot_text_redacted": "",
+                    "intent": None,
+                    "doc_id": None,
+                    "route": "error",
+                    "low_score": False,
+                    "lead_flow": False,
+                    "handoff_filter": False,
+                    "answer_chars": 0,
+                    "latency_ms": None,
+                    "fallback_reason": "ask_stream_failed",
+                },
+            )
         emit_bot_event(
             logger,
             "ask_stream_failed",
@@ -1674,6 +1800,8 @@ def create_lead():
         return jsonify({"ok": False, "error_code": "unknown_client", "delivery": None}), 403
     data["client_id"] = client_id
     sid = sid_from_body(data)
+    data["sid"] = sid
+    data["request_id"] = request.ctx.get("request_id")
     _bind_chat_ctx(sid, client_id)
     payload, status = handle_lead(data)
     return jsonify(payload), status

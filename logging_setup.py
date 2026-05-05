@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from logging.handlers import RotatingFileHandler
@@ -13,7 +14,11 @@ LOG_DIR = os.getenv("BOT_LOG_DIR", "logs")
 LOG_FILE = os.path.join(LOG_DIR, os.getenv("BOT_LOG_FILE", "app.jsonl"))
 
 SENSITIVE_KEYS = ("api_key", "apikey", "token", "secret", "authorization", "password")
+_USAGE_TOKEN_KEYS = frozenset({"prompt_tokens", "completion_tokens", "total_tokens"})
 _PHONE_DIGIT_MIN = 10
+_PHONE_DIGIT_MAX = 15
+# Ловим номера в разных форматах: +7..., 8(...), с пробелами/скобками/дефисами.
+_PHONE_TEXT_RX = re.compile(r"(?<!\d)(?:\+?\d[\d\-\s().]{8,}\d)(?!\d)")
 
 BOT_EVENTS_SCHEMA_VERSION = int(os.getenv("BOT_EVENTS_SCHEMA_VERSION", "1"))
 
@@ -21,11 +26,24 @@ BOT_EVENTS_SCHEMA_VERSION = int(os.getenv("BOT_EVENTS_SCHEMA_VERSION", "1"))
 def _mask_phone_like(value):
     s = str(value or "")
     digits = "".join(ch for ch in s if ch.isdigit())
-    if len(digits) < _PHONE_DIGIT_MIN:
+    if len(digits) < _PHONE_DIGIT_MIN or len(digits) > _PHONE_DIGIT_MAX:
         return value
     if len(digits) >= 11:
         return f"+{digits[0]}******{digits[-2:]}"
     return "***"
+
+
+def _mask_phone_in_text(value):
+    s = str(value or "")
+    return _PHONE_TEXT_RX.sub(lambda m: str(_mask_phone_like(m.group())), s)
+
+
+def redact_text(value: str, *, max_len: int | None = None) -> str:
+    """Явная редактирующая функция для payload до записи в любое хранилище."""
+    out = _mask_phone_in_text(value or "")
+    if max_len is not None and max_len > 0 and len(out) > max_len:
+        return out[:max_len]
+    return out
 
 
 def _sanitize(d):
@@ -34,17 +52,22 @@ def _sanitize(d):
     clean = {}
     for k, v in d.items():
         kl = k.lower() if isinstance(k, str) else ""
-        if isinstance(k, str) and any(s in kl for s in SENSITIVE_KEYS):
+        if isinstance(k, str) and kl not in _USAGE_TOKEN_KEYS and any(s in kl for s in SENSITIVE_KEYS):
             clean[k] = "***"
         elif isinstance(k, str) and ("phone" in kl or "tel" in kl):
             clean[k] = _mask_phone_like(v)
         elif isinstance(k, str) and "situation" in kl:
-            txt = str(v or "")
+            txt = _mask_phone_in_text(v)
             clean[k] = (txt[:80] + "…") if len(txt) > 80 else txt
         elif isinstance(v, dict):
             clean[k] = _sanitize(v)
         elif isinstance(v, list):
-            clean[k] = [_sanitize(x) if isinstance(x, dict) else x for x in v]
+            clean[k] = [
+                _sanitize(x) if isinstance(x, dict) else (_mask_phone_in_text(x) if isinstance(x, str) else x)
+                for x in v
+            ]
+        elif isinstance(v, str):
+            clean[k] = _mask_phone_in_text(v)
         else:
             clean[k] = v
     return clean
@@ -126,8 +149,9 @@ def emit_bot_event(
     row = {
         "kind": "bot_event",
         "schema_version": BOT_EVENTS_SCHEMA_VERSION,
-        "event": event_name,
+        "event_type": event_name,
     }
+    row["ts"] = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
     row.update(request_context_defaults())
     for k, v in overrides.items():
         if v is not None:
@@ -135,7 +159,14 @@ def emit_bot_event(
     if status is not None:
         row["status"] = status
     row["details"] = dict(details or {})
-    logger.info("bot_event", extra={"extra_data": _sanitize(row)})
+    safe_row = _sanitize(row)
+    try:
+        from pg_sink import enqueue_bot_event
+
+        enqueue_bot_event(safe_row)
+    except Exception:
+        pass
+    logger.info("bot_event", extra={"extra_data": safe_row})
 
 
 def log_json(logger, message, **fields):

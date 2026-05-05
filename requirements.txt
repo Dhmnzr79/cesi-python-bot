@@ -6,3 +6,4 @@ numpy
 python-frontmatter
 pyyaml
 pymorphy3
+psycopg[binary]

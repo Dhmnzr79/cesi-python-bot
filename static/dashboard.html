@@ -100,7 +100,7 @@
         const det = stringifyDetails(ev);
         return '<tr>'
           + '<td class="mono">' + (ev.ts || '-') + '</td>'
-          + '<td><strong>' + (ev.event || '-') + '</strong></td>'
+          + '<td><strong>' + (ev.event_type || ev.event || '-') + '</strong></td>'
           + '<td class="mono">' + (ev.sid || ev.session_id || '—') + '</td>'
           + '<td class="mono">' + (ev.client_id || '—') + '</td>'
           + '<td>' + (ev.status != null ? String(ev.status) : '—') + '</td>'
