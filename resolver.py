@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from contracts.decision_frame import DecisionFrame
 from llm import client
-from logging_setup import get_logger, log_llm_error, log_llm_usage, emit_bot_event
+from logging_setup import get_logger, log_json, log_llm_error, log_llm_usage, emit_bot_event
 
 
 logger = get_logger("bot")
@@ -217,6 +217,86 @@ def resolve_decision_frame(*, question: str, history: list[dict[str, Any]] | Non
     except Exception as e:
         log_llm_error(logger, call_type="v5_resolver", err=str(e), model=_MODEL)
         return _fallback_unknown()
+
+
+def map_classify_intent_to_route_intent(old_intent: str) -> str:
+    """Map legacy classify_intent label to DecisionFrame.route_intent (PR #1.2 safety-net)."""
+    x = (old_intent or "").strip().lower()
+    if x == "price_lookup":
+        return "price_lookup"
+    if x == "price_concern":
+        return "price_concern"
+    if x == "content":
+        return "content"
+    if x == "contacts":
+        logger.warning(
+            "resolver_safety_net_contacts_unexpected",
+            extra={
+                "extra_data": {"old_intent": old_intent, "hint": "should be handled by gates (A1), not Resolver"},
+            },
+        )
+        return "content"
+    if x == "offtopic":
+        return "unknown"
+    return "unknown"
+
+
+def resolve_with_fallback(
+    *,
+    question: str,
+    history: list[dict[str, Any]] | None,
+    client_id: str,
+    sid: str,
+    session_state: dict[str, Any] | None = None,
+) -> tuple[DecisionFrame, list[str]]:
+    """
+    Run Resolver LLM decision, apply safety-net against THRESHOLDS via classify_intent fallback.
+    session_state reserved for future (context); not used in PR #1.2.
+
+    Returns (DecisionFrame, safety_net_used) where safety_net_used is a subset of
+    ["intent", "topic", "query_mode"].
+    """
+    _ = session_state  # intentional no-op until multi-client/context wiring
+    from core.routing_loader import THRESHOLDS
+
+    decision = resolve_decision_frame(question=question, history=history)
+    flags: list[str] = []
+
+    thresh = THRESHOLDS.resolver.min_confidence
+    ci = float(decision.confidence.intent or 0.0)
+    if ci < float(thresh.intent):
+        from llm import classify_intent
+
+        old_intent = classify_intent(question, client_id=client_id, sid=sid)
+        decision.route_intent = map_classify_intent_to_route_intent(old_intent)
+        flags.append("intent")
+        log_json(
+            logger,
+            "safety_net_intent_used",
+            sid=sid,
+            client_id=client_id,
+            old=old_intent,
+            conf=round(ci, 4),
+            route_intent=decision.route_intent,
+        )
+    else:
+        log_json(logger, "resolver_used_intent", sid=sid, client_id=client_id, conf=round(ci, 4))
+
+    ct = float(decision.confidence.topic or 0.0)
+    if ct < float(thresh.topic):
+        decision.service_topic = "unknown"
+        flags.append("topic")
+        log_json(logger, "safety_net_topic_used", sid=sid, client_id=client_id, conf=round(ct, 4))
+    else:
+        log_json(logger, "resolver_used_topic", sid=sid, client_id=client_id, conf=round(ct, 4))
+
+    cm = float(decision.confidence.query_mode or 0.0)
+    if cm < float(thresh.query_mode):
+        decision.query_mode = "specific"
+        flags.append("query_mode")
+        log_json(logger, "safety_net_query_mode_used", sid=sid, client_id=client_id, conf=round(cm, 4))
+
+    return decision, flags
 
 
 def maybe_start_shadow_resolver(*, question: str, sid: str, client_id: str) -> None:

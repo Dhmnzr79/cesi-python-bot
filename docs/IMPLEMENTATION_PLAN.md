@@ -62,6 +62,7 @@ Track D — Multi-client (параллельно, после Phase 1)
    └── PR #D.3  Per-client eval directory + CI
 
 Track E — Observability (параллельно, по мере появления слоёв)
+   ├── PR #E.0  e2e smoke runner (обязательное условие для PR #1.2)
    ├── PR #E.1  Trace logging on
    ├── PR #E.2  Per-layer eval в CI
    ├── PR #E.3  Turn replay view
@@ -215,9 +216,11 @@ docs/ARCHITECTURE V5.md.
 - **Trace:** в turn-trace логируются маркеры `resolver_used` и `safety_net_used` (какой путь реально сработал).
 
 **Acceptance:**
-- Eval `accuracy_full.json` (текущий) не падает >2%.
+- `evals/v5/run_layer_eval.py --layer resolver` ≥ 90% по каждому полю DecisionFrame.
+- Ручной smoke-прогон 15 кейсов из `evals/routing_smoke.md` с включённым Resolver — ответы корректные.
 - `RESOLVER_OFF=1` → бот работает по v4.
 - Trace показывает `resolver_used | safety_net_used`.
+- В `pg_sink` на 50 пробных turns: `% safety_net_used < 30%` (если выше — пороги слишком жёсткие; корректировать в `routing.yaml` отдельным PR).
 
 **Что мониторить после deploy (shadow→on):**
 - `% turns с safety_net_intent` < 15% (15–25% — ок, но watch; >25% → порог слишком жёсткий, смягчить в `routing.yaml`).
@@ -225,6 +228,7 @@ docs/ARCHITECTURE V5.md.
 - `% turns с query_mode default to specific` < 30% (safe default, не критично).
 
 **Зависит от:** PR #1.1.
+**Важно:** перед PR #1.2 должен быть готов PR #E.0 (e2e smoke runner), иначе включение Resolver остаётся слепым полётом.
 
 **DEPRECATED:** `llm.py:classify_intent` — помечается, но НЕ удаляется (нужен для safety-net).
 

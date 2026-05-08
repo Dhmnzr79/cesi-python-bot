@@ -5,12 +5,13 @@ import time
 import inspect
 import json
 import threading
+from datetime import datetime, timezone
 from collections import deque
 import numpy as np
 
 from flask import Flask, jsonify, request, send_from_directory, stream_with_context
 import session as session_mod
-from pg_sink import init_pg_sink
+from pg_sink import enqueue_v5_turn_trace, init_pg_sink
 
 from config import (
     ALIAS_STRONG_THRESHOLD,
@@ -33,7 +34,7 @@ from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_con
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
-from resolver import maybe_start_shadow_resolver, resolve_decision_frame
+from resolver import maybe_start_shadow_resolver, resolve_with_fallback
 from content_arbiter import collect_content_candidates, select_content_route
 from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
@@ -76,37 +77,40 @@ from ux_builder import (
     offtopic_response,
     reset_session_response,
 )
-from core.routing_loader import THRESHOLDS
+def _is_resolver_bypassed_env() -> bool:
+    """PR #1.2: emergency v4 path — only exact ``RESOLVER_OFF=1``."""
+    return os.environ.get("RESOLVER_OFF") == "1"
 
 
-def _is_resolver_off() -> bool:
-    return (os.getenv("RESOLVER_OFF") or "").strip().lower() in ("1", "true", "yes")
+def _enqueue_v5_resolver_trace(
+    *,
+    decision,
+    safety_net_used: list[str],
+    resolver_bypassed_env: bool,
+) -> None:
+    ctx = getattr(request, "ctx", None) or {}
+    turn_id = ctx.get("request_id")
+    if not turn_id:
+        return
+    try:
+        enqueue_v5_turn_trace(
+            {
+                "turn_id": str(turn_id),
+                "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "sid": ctx.get("sid"),
+                "client_id": ctx.get("client_id"),
+                "request_id": str(turn_id),
+                "gate_traces": [],
+                "decision_frame": decision.model_dump() if decision is not None else None,
+                "retrieval_candidates": [],
+                "errors": [],
+                "safety_net_used": list(safety_net_used),
+                "resolver_bypassed_env": bool(resolver_bypassed_env),
+            }
+        )
+    except Exception:
+        pass
 
-
-def _map_old_intent_to_route_intent(old_intent: str) -> str:
-    x = (old_intent or "").strip().lower()
-    if x == "price_lookup":
-        return "price_lookup"
-    if x == "price_concern":
-        return "price_concern"
-    if x == "content":
-        return "content"
-    # Should be handled by gates upstream.
-    if x == "contacts":
-        return "unknown"
-    # offtopic is handled by handoff filter; keep unknown as safe fallback.
-    if x == "offtopic":
-        return "unknown"
-    return "unknown"
-
-
-def _route_intent_to_v4_intent(route_intent: str) -> str:
-    x = (route_intent or "").strip().lower()
-    if x in ("price_lookup", "price_concern"):
-        return x
-    if x in ("content", "unknown"):
-        return "content"
-    return "content"
 
 app = Flask(__name__, static_folder="static")
 logger = get_logger("bot")
@@ -1026,50 +1030,29 @@ def ask():
                         route="retrieval_chunk",
                     )
 
-        # v5 resolver (Phase 1 PR #1.2): routing uses DecisionFrame, with safety-net fallbacks.
+        # v5 Resolver PR #1.2 (safety-net): branch on DecisionFrame.route_intent; v4 classify_intent on bypass.
+        resolver_bypassed_env = _is_resolver_bypassed_env()
         decision = None
-        safety_net_used: dict[str, bool] = {"intent": False, "topic": False, "query_mode": False}
-        if not _is_resolver_off():
+        safety_net_used: list[str] = []
+
+        if resolver_bypassed_env:
+            log_json(logger, "resolver_bypassed_env", sid=sid, client_id=client_id)
+            intent = classify_intent(q, client_id=client_id, sid=sid)
+            request.ctx["resolver_used"] = False
+            request.ctx["safety_net_used"] = False
+            maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
+            _enqueue_v5_resolver_trace(decision=None, safety_net_used=[], resolver_bypassed_env=True)
+        else:
             hist = list((st or {}).get("hist") or [])
-            decision = resolve_decision_frame(question=q, history=hist)
+            decision, safety_net_used = resolve_with_fallback(
+                question=q,
+                history=hist,
+                client_id=client_id,
+                sid=sid,
+                session_state=st,
+            )
             request.ctx["resolver_used"] = True
-
-            if float(decision.confidence.intent or 0.0) < float(THRESHOLDS.resolver.min_confidence.intent):
-                old_intent = classify_intent(q, client_id=client_id, sid=sid)
-                decision.route_intent = _map_old_intent_to_route_intent(old_intent)
-                safety_net_used["intent"] = True
-                log_json(
-                    logger,
-                    "resolver_safety_net_intent",
-                    sid=sid,
-                    client_id=client_id,
-                    old_intent=old_intent,
-                    confidence=round(float(decision.confidence.intent or 0.0), 4),
-                )
-
-            if float(decision.confidence.topic or 0.0) < float(THRESHOLDS.resolver.min_confidence.topic):
-                decision.service_topic = "unknown"
-                safety_net_used["topic"] = True
-                log_json(
-                    logger,
-                    "resolver_safety_net_topic",
-                    sid=sid,
-                    client_id=client_id,
-                    confidence=round(float(decision.confidence.topic or 0.0), 4),
-                )
-
-            if float(decision.confidence.query_mode or 0.0) < float(THRESHOLDS.resolver.min_confidence.query_mode):
-                decision.query_mode = "specific"
-                safety_net_used["query_mode"] = True
-                log_json(
-                    logger,
-                    "resolver_safety_net_query_mode",
-                    sid=sid,
-                    client_id=client_id,
-                    confidence=round(float(decision.confidence.query_mode or 0.0), 4),
-                )
-
-            request.ctx["safety_net_used"] = any(bool(v) for v in safety_net_used.values())
+            request.ctx["safety_net_used"] = bool(safety_net_used)
             emit_bot_event(
                 logger,
                 "v5_decision_frame_used",
@@ -1077,15 +1060,19 @@ def ask():
                 details={
                     "decision_frame": decision.model_dump(),
                     "safety_net_used": safety_net_used,
+                    "resolver_bypassed_env": False,
                 },
             )
-            intent = _route_intent_to_v4_intent(str(decision.route_intent))
-        else:
-            request.ctx["resolver_used"] = False
-            request.ctx["safety_net_used"] = False
-            intent = classify_intent(q, client_id=client_id, sid=sid)
-            # Keep Phase 1 shadow logging to compare behavior while bypassing.
-            maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
+            _enqueue_v5_resolver_trace(
+                decision=decision,
+                safety_net_used=safety_net_used,
+                resolver_bypassed_env=False,
+            )
+            ri = str(decision.route_intent or "").strip().lower()
+            if ri in ("price_lookup", "price_concern"):
+                intent = ri
+            else:
+                intent = "content"
 
         if intent == "offtopic":
             return _service_reply(offtopic_response(), sid, q, route="offtopic")
@@ -1740,49 +1727,28 @@ def ask_stream():
                         route="retrieval_chunk",
                     )
 
+        resolver_bypassed_env = _is_resolver_bypassed_env()
         decision = None
-        safety_net_used: dict[str, bool] = {"intent": False, "topic": False, "query_mode": False}
-        if not _is_resolver_off():
+        safety_net_used: list[str] = []
+
+        if resolver_bypassed_env:
+            log_json(logger, "resolver_bypassed_env", sid=sid, client_id=client_id)
+            intent = classify_intent(q, client_id=client_id, sid=sid)
+            request.ctx["resolver_used"] = False
+            request.ctx["safety_net_used"] = False
+            maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
+            _enqueue_v5_resolver_trace(decision=None, safety_net_used=[], resolver_bypassed_env=True)
+        else:
             hist = list((st or {}).get("hist") or [])
-            decision = resolve_decision_frame(question=q, history=hist)
+            decision, safety_net_used = resolve_with_fallback(
+                question=q,
+                history=hist,
+                client_id=client_id,
+                sid=sid,
+                session_state=st,
+            )
             request.ctx["resolver_used"] = True
-
-            if float(decision.confidence.intent or 0.0) < float(THRESHOLDS.resolver.min_confidence.intent):
-                old_intent = classify_intent(q, client_id=client_id, sid=sid)
-                decision.route_intent = _map_old_intent_to_route_intent(old_intent)
-                safety_net_used["intent"] = True
-                log_json(
-                    logger,
-                    "resolver_safety_net_intent",
-                    sid=sid,
-                    client_id=client_id,
-                    old_intent=old_intent,
-                    confidence=round(float(decision.confidence.intent or 0.0), 4),
-                )
-
-            if float(decision.confidence.topic or 0.0) < float(THRESHOLDS.resolver.min_confidence.topic):
-                decision.service_topic = "unknown"
-                safety_net_used["topic"] = True
-                log_json(
-                    logger,
-                    "resolver_safety_net_topic",
-                    sid=sid,
-                    client_id=client_id,
-                    confidence=round(float(decision.confidence.topic or 0.0), 4),
-                )
-
-            if float(decision.confidence.query_mode or 0.0) < float(THRESHOLDS.resolver.min_confidence.query_mode):
-                decision.query_mode = "specific"
-                safety_net_used["query_mode"] = True
-                log_json(
-                    logger,
-                    "resolver_safety_net_query_mode",
-                    sid=sid,
-                    client_id=client_id,
-                    confidence=round(float(decision.confidence.query_mode or 0.0), 4),
-                )
-
-            request.ctx["safety_net_used"] = any(bool(v) for v in safety_net_used.values())
+            request.ctx["safety_net_used"] = bool(safety_net_used)
             emit_bot_event(
                 logger,
                 "v5_decision_frame_used",
@@ -1790,14 +1756,19 @@ def ask_stream():
                 details={
                     "decision_frame": decision.model_dump(),
                     "safety_net_used": safety_net_used,
+                    "resolver_bypassed_env": False,
                 },
             )
-            intent = _route_intent_to_v4_intent(str(decision.route_intent))
-        else:
-            request.ctx["resolver_used"] = False
-            request.ctx["safety_net_used"] = False
-            intent = classify_intent(q, client_id=client_id, sid=sid)
-            maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
+            _enqueue_v5_resolver_trace(
+                decision=decision,
+                safety_net_used=safety_net_used,
+                resolver_bypassed_env=False,
+            )
+            ri = str(decision.route_intent or "").strip().lower()
+            if ri in ("price_lookup", "price_concern"):
+                intent = ri
+            else:
+                intent = "content"
 
         if intent == "offtopic":
             return _sse_service_reply(offtopic_response(), sid, q, route="offtopic")

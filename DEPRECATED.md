@@ -23,7 +23,7 @@
 
 | Что | File:line | Заменено на | Помечено в PR | Удалить в PR |
 |---|---|---|---|---|
-| `llm.py:classify_intent` | `llm.py:971` | `resolver.py:resolve_decision_frame` + safety-net в `app.py` | PR #1.2 | PR #2.1 |
+| `llm.py:classify_intent` | `llm.py:971` | `resolver.py:resolve_with_fallback()` + запись trace в `pg_sink` из `app.py` | PR #1.2 | PR #2.1 |
 
 ---
 

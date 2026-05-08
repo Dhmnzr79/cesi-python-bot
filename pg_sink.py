@@ -168,6 +168,60 @@ def _ensure_tables(conn) -> None:
             ON v5_turn_traces (sid, ts DESC);
             """
         )
+        cur.execute(
+            """
+            ALTER TABLE v5_turn_traces
+                ADD COLUMN IF NOT EXISTS safety_net_used JSONB NOT NULL DEFAULT '[]'::jsonb;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE v5_turn_traces
+                ADD COLUMN IF NOT EXISTS resolver_bypassed_env BOOLEAN NOT NULL DEFAULT false;
+            """
+        )
+
+
+def _insert_v5_turn_trace(conn, row: dict) -> None:
+    from psycopg.types.json import Json
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO v5_turn_traces (
+                turn_id, ts, sid, client_id, request_id,
+                gate_traces,
+                decision_frame,
+                retrieval_candidates,
+                errors,
+                safety_net_used,
+                resolver_bypassed_env
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (turn_id) DO UPDATE SET
+                ts = EXCLUDED.ts,
+                sid = EXCLUDED.sid,
+                client_id = EXCLUDED.client_id,
+                request_id = EXCLUDED.request_id,
+                decision_frame = EXCLUDED.decision_frame,
+                safety_net_used = EXCLUDED.safety_net_used,
+                resolver_bypassed_env = EXCLUDED.resolver_bypassed_env
+            ;
+            """,
+            (
+                str(row.get("turn_id") or ""),
+                _parse_ts(row.get("ts")),
+                row.get("sid"),
+                row.get("client_id"),
+                row.get("request_id"),
+                Json(list(row.get("gate_traces") or [])),
+                Json(dict(row["decision_frame"])) if isinstance(row.get("decision_frame"), dict) else None,
+                Json(list(row.get("retrieval_candidates") or [])),
+                Json(list(row.get("errors") or [])),
+                Json(list(row.get("safety_net_used") or [])),
+                bool(row.get("resolver_bypassed_env")),
+            ),
+        )
 
 
 def _insert_bot_event(conn, row: dict) -> None:
@@ -248,6 +302,8 @@ def _worker() -> None:
                             _insert_bot_event(conn, payload)
                         elif kind == "lead":
                             _insert_lead(conn, payload)
+                        elif kind == "v5_turn_trace":
+                            _insert_v5_turn_trace(conn, payload)
                     except Exception as e:
                         _log(
                             "warning",
@@ -319,4 +375,9 @@ def enqueue_bot_event(row: dict) -> None:
 
 def enqueue_lead(row: dict) -> None:
     _enqueue("lead", row)
+
+
+def enqueue_v5_turn_trace(row: dict) -> None:
+    """Append/update one row in v5_turn_traces (Resolver slice for PR #1.2)."""
+    _enqueue("v5_turn_trace", row)
 
