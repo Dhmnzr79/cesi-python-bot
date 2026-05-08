@@ -35,6 +35,16 @@
 
 ---
 
+## Закрытый технический долг (не registry-row)
+
+| Проблема | Закрыто в PR | Примечание |
+|---|---|---|
+| Расхождение промпта Resolver между eval (`resolve_decision_frame_shadow`) и runtime (`resolve_decision_frame`) | PR #1.2.6 | Единый `RESOLVER_SYSTEM_PROMPT` + общий `_call_resolver_llm`; golden eval вызывает `resolve_decision_frame`. |
+| Дублирование pipeline между `/ask` и `/ask/stream` | PR #1.2.5 | Общий `_orchestrate_ask_turn`; эндпоинты — только JSON vs SSE dispatch. |
+| Topic-leak в multi-turn retrieval | reverted in PR #1.3-revert | Было в PR #1.3: жёсткий `scope_topic` в `retrieve()`. Отключено до A3: в runtime всегда `scope_topic=None`; в trace остаётся `retrieval_scope_topic` (что предложил Resolver). Вернуть применение scope после deterministic A3 catalog route. |
+
+---
+
 ## Запланированное к DEPRECATED (по дорожной карте)
 
 Из `docs/ARCHITECTURE V5.md §9`. Эти строки появятся в Active после соответствующих PR.

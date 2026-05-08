@@ -7,6 +7,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from flask import Flask, jsonify, request, send_from_directory, stream_with_context
@@ -29,6 +30,8 @@ from config import (
     RATE_LIMIT_WINDOW_SEC,
     resolve_client_id,
 )
+from contracts.ask_orchestration import AskOrchestrationResult
+from core.routing_loader import THRESHOLDS
 from lead_service import handle_lead
 from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_context, log_json, redact_text
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
@@ -41,6 +44,7 @@ from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
 from policy import (
     apply_response_policy,
+    contacts_intent,
     pick_contacts_chunk,
 )
 from retriever import (
@@ -646,6 +650,12 @@ def finalize_ask(
                 "fallback_reason": pmeta.get("fallback_reason"),
                 "resolver_used": bool(request.ctx.get("resolver_used")),
                 "safety_net_used": bool(request.ctx.get("safety_net_used")),
+                "retrieval_scope_topic": request.ctx.get("retrieval_scope_topic"),
+                "retrieval_scope_widen_fallback": bool(
+                    request.ctx.get("retrieval_scope_widen_fallback")
+                ),
+                "legacy_intent": request.ctx.get("legacy_intent"),
+                "effective_intent": str(request.ctx.get("effective_intent") or ""),
             },
         )
     cta = payload.get("cta")
@@ -869,622 +879,329 @@ def dashboard_events_api():
     return jsonify(payload)
 
 
+def _orch_decision_dump(decision):
+    """DecisionFrame после Resolver либо None (RESOLVER_OFF / ранний выход)."""
+    return decision.model_dump() if decision is not None else None
+
+
+def _orchestrate_ask_turn(data: dict):
+    decision = None
+    client_id = resolve_client_id(data.get('client_id'))
+    if client_id is None:
+        return AskOrchestrationResult(kind='unknown_client', client_error={'error': 'unknown_client'}, http_status=403)
+    q_raw = data.get('q') or ''
+    q = (q_raw or '').strip()
+    ref = (data.get('ref') or '').strip()
+    sid = sid_from_body(data)
+    if q and q.lower() in ('/reset', '/новая'):
+        mem_reset(sid)
+        return AskOrchestrationResult(kind='reset_session', q=q, sid=sid, client_id=client_id)
+    q, truncated = _normalize_question_text(q_raw)
+    _bind_chat_ctx(sid, client_id)
+    request.ctx["retrieval_scope_topic"] = None
+    request.ctx["retrieval_scope_widen_fallback"] = False
+    request.ctx["legacy_intent"] = None
+    request.ctx["effective_intent"] = None
+    if truncated:
+        log_json(logger, 'input_truncated', sid=sid, client_id=client_id, original_len=len((q_raw or '').strip()), max_len=INPUT_MAX_CHARS)
+    ip = _resolve_request_ip()
+    if not _check_rate_limit(ip):
+        log_json(logger, 'rate_limited', sid=sid, client_id=client_id, ip=ip)
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_rate_limited_response_payload(), service_route='rate_limited', http_status=429)
+    if _is_obvious_noise(q):
+        log_json(logger, 'obvious_noise_short_circuit', sid=sid, client_id=client_id)
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_obvious_noise_payload(sid, client_id), service_doc_id=None, service_track_user=True, service_route='noise_short_circuit', decision_frame=_orch_decision_dump(decision))
+    if q:
+        hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
+        label = str(hf.get('label') or '').lower()
+        reason = str(hf.get('reason') or 'unspecified').lower()
+        confidence = float(hf.get('confidence') or 0.0)
+        is_handoff = label == 'handoff'
+        log_json(logger, 'handoff_filter_gate', sid=sid, client_id=client_id, label=label, reason=reason[:64], confidence=round(confidence, 4), is_handoff=is_handoff)
+        if is_handoff:
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_handoff_filter_payload(sid=sid, client_id=client_id, reason=reason), service_doc_id=None, service_track_user=True, service_route='handoff_filter', decision_frame=_orch_decision_dump(decision))
+    st = mem_get(sid)
+    flow_result = handle_flows(data=data, st=st, sid=sid, q=q, client_id=client_id, txt=TXT, service_payload=_service_payload, get_last_content_ui_payload=_get_last_content_ui_payload_compat, get_topic_state=get_topic_state)
+    if flow_result is not None:
+        redirect_ref = (flow_result.get('redirect_ref') or '').strip()
+        if redirect_ref:
+            ch = get_chunk_by_ref(redirect_ref, client_id=client_id)
+            if ch:
+                return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=q or f'Информация из {redirect_ref}', log_event='Answer generated from flow redirect_ref', chunk_route='flow_redirect_ref', decision_frame=_orch_decision_dump(decision))
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=flow_result['payload'], service_doc_id=flow_result.get('doc_id'), service_track_user=True, service_route='lead_flow', decision_frame=_orch_decision_dump(decision))
+    st = mem_get(sid)
+    if _is_duplicate_question(st, q):
+        snap = _get_last_content_ui_payload_compat(sid)
+        log_json(logger, 'duplicate_short_circuit', sid=sid, client_id=client_id)
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_duplicate_payload(sid, client_id, snap), service_doc_id=None, service_track_user=True, service_route='duplicate_short_circuit', decision_frame=_orch_decision_dump(decision))
+    if _is_message_burst(st):
+        set_anti_spam_redirect_shown(sid, True)
+        log_json(logger, 'anti_spam_burst_redirect', sid=sid, client_id=client_id, burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC, burst_messages=ANTI_SPAM_BURST_MESSAGES)
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_soft_redirect_payload(sid, client_id), service_doc_id=None, service_track_user=True, service_route='booking_flow', decision_frame=_orch_decision_dump(decision))
+    if _should_soft_redirect_no_intent(st):
+        set_anti_spam_redirect_shown(sid, True)
+        log_json(logger, 'anti_spam_soft_redirect', sid=sid, client_id=client_id, session_turn_count=int(st.get('session_turn_count') or 0))
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_soft_redirect_payload(sid, client_id), service_doc_id=None, service_track_user=True, service_route='booking_flow', decision_frame=_orch_decision_dump(decision))
+    if ref:
+        ch = get_chunk_by_ref(ref, client_id=client_id)
+        if ch:
+            return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=q or f'Информация из {ref}', log_event='Answer generated from ref', chunk_route='retrieval_chunk', decision_frame=_orch_decision_dump(decision))
+    if not q:
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=empty_question_response(), service_doc_id=None, service_track_user=False, service_route='error', decision_frame=_orch_decision_dump(decision))
+    if _is_short_contextual(q, st):
+        current_doc_id = (st.get('current_doc_id') or '').strip()
+        if current_doc_id:
+            ch = get_chunk_by_ref(f'{current_doc_id}#korotko', client_id=client_id)
+            if ch:
+                return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=q, log_event='Answer from short_contextual fallback', chunk_route='retrieval_chunk', decision_frame=_orch_decision_dump(decision))
+    resolver_bypassed_env = _is_resolver_bypassed_env()
+    safety_net_used: list[str] = []
+    decision = None
+    if resolver_bypassed_env:
+        log_json(logger, 'resolver_bypassed_env', sid=sid, client_id=client_id)
+        intent = classify_intent(q, client_id=client_id, sid=sid)
+        request.ctx['legacy_intent'] = intent
+        request.ctx['effective_intent'] = str(intent)
+        request.ctx['resolver_used'] = False
+        request.ctx['safety_net_used'] = False
+        maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
+        _enqueue_v5_resolver_trace(decision=None, safety_net_used=[], resolver_bypassed_env=True)
+    else:
+        hist = list((st or {}).get('hist') or [])
+        with ThreadPoolExecutor(max_workers=2) as _tp:
+            fut_legacy = _tp.submit(classify_intent, q, client_id=client_id, sid=sid)
+            decision, safety_net_used = resolve_with_fallback(
+                question=q, history=hist, client_id=client_id, sid=sid, session_state=st
+            )
+            try:
+                legacy_intent = fut_legacy.result(timeout=180)
+            except Exception as ex_lr:
+                log_json(
+                    logger,
+                    'legacy_intent_parallel_failed',
+                    sid=sid,
+                    client_id=client_id,
+                    err=str(ex_lr)[:400],
+                )
+                legacy_intent = None
+        request.ctx['legacy_intent'] = legacy_intent
+        request.ctx['resolver_used'] = True
+        request.ctx['safety_net_used'] = bool(safety_net_used)
+        emit_bot_event(logger, 'v5_decision_frame_used', status='ok', details={'decision_frame': decision.model_dump(), 'safety_net_used': safety_net_used, 'resolver_bypassed_env': False})
+        _enqueue_v5_resolver_trace(decision=decision, safety_net_used=safety_net_used, resolver_bypassed_env=False)
+        ri = str(decision.route_intent or '').strip().lower()
+        if ri in ('price_lookup', 'price_concern'):
+            intent = ri
+        else:
+            intent = 'content'
+        request.ctx['effective_intent'] = str(intent)
+    # Shadow telemetry only: Resolver topic suggestion for dashboards — не режем корпус до A3 (см. DEPRECATED.md).
+    retrieval_scope = None
+    if decision is not None:
+        st_tp = decision.service_topic
+        if (
+            st_tp
+            and str(st_tp).strip().lower() not in ('', 'unknown')
+            and float(decision.confidence.topic or 0.0)
+            >= float(THRESHOLDS.retrieval.scope_topic_min_confidence)
+        ):
+            retrieval_scope = str(st_tp).strip().lower()
+    request.ctx['retrieval_scope_topic'] = retrieval_scope
+
+    qp_loc = normalize_retrieval_query(q) or (q or "")
+    if intent != 'offtopic' and (
+        contacts_intent(qp_loc.strip()) or contacts_intent((q or '').strip())
+    ):
+        intent = 'contacts'
+        retrieval_scope = None
+        request.ctx['retrieval_scope_topic'] = None
+        request.ctx['effective_intent'] = 'contacts'
+
+    if intent == 'offtopic':
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=offtopic_response(), service_doc_id=None, service_track_user=True, service_route='offtopic', decision_frame=_orch_decision_dump(decision))
+    if intent == 'contacts':
+        # Contacts retrieval must stay full-corpus so clinic chunks aren't dropped by stale topic scope.
+        cands = retrieve(q, topk=24, client_id=client_id, scope_topic=None)
+        picked = pick_contacts_chunk(cands)
+        if picked is None:
+            picked = get_chunk_by_ref("clinic__info__contacts.md#korotko", client_id=client_id)
+        if picked:
+            return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=picked, llm_question=q, log_event='Answer generated from contacts intent', chunk_route='contacts_chunk', decision_frame=_orch_decision_dump(decision))
+    if intent in ('price_lookup', 'price_concern'):
+        price_route = select_price_service_route(q, client_id=client_id, sid=sid, intent_override=intent)
+        if price_route.get('mode') == 'clarify':
+            payload = build_price_clarify_payload(sid=sid, client_id=client_id, intent=str(price_route.get('intent') or 'other'), fallback_reason=str(price_route.get('fallback_reason') or 'service_not_found'))
+            log_json(logger, 'price_route', **payload.get('meta') or {})
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='price_lookup', decision_frame=_orch_decision_dump(decision))
+        if price_route.get('mode') == 'matched':
+            intent = str(price_route.get('intent') or 'other')
+            request.ctx['effective_intent'] = str(intent)
+            service = price_route.get('service') or {}
+            service_id = str(price_route.get('matched_service_id') or '')
+            match_score = float(price_route.get('match_score') or 0.0)
+            route_source = str(price_route.get('route_source') or 'catalog')
+            if service_id:
+                set_last_catalog_service(sid, service_id)
+            if intent == 'price_concern':
+                concern_ref = str(service.get('concern_ref') or '').strip()
+                if concern_ref:
+                    ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+                    if ch:
+                        log_json(logger, 'price_route', intent='price_concern', matched_service_id=service_id, match_score=round(match_score, 4), route_source='concern_ref', concern_ref=concern_ref, fallback_reason=None)
+                        return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=q, log_event='Answer generated from concern_ref', chunk_route='price_concern', decision_frame=_orch_decision_dump(decision))
+                payload = build_price_concern_payload(sid=sid, client_id=client_id, service_id=service_id, service=service, match_score=match_score)
+                log_json(logger, 'price_route', **payload.get('meta') or {})
+                return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='price_concern', decision_frame=_orch_decision_dump(decision))
+            if route_source == 'price_ref' and price_route.get('price_ref'):
+                ref = str(price_route.get('price_ref') or '').strip()
+                ch = get_chunk_by_ref(ref, client_id=client_id)
+                if ch:
+                    log_json(logger, 'price_route', intent='price_lookup', matched_service_id=service_id, match_score=round(match_score, 4), route_source='price_ref', price_key=price_route.get('price_key'), price_ref=ref, fallback_reason=None)
+                    llmq = q or f'Цена по {ref}'
+                    return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llmq, log_event='Answer generated from price_ref', chunk_route='price_lookup', decision_frame=_orch_decision_dump(decision))
+            payload = build_price_lookup_payload(sid=sid, client_id=client_id, service_id=service_id, service=service, match_score=match_score, route_source=route_source, price_key=price_route.get('price_key'), price_ref=price_route.get('price_ref'), price_item=price_route.get('price_item'))
+            log_json(logger, 'price_route', **payload.get('meta') or {})
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='price_lookup', decision_frame=_orch_decision_dump(decision))
+    if intent == 'content':
+        cands = collect_content_candidates(
+            q=q, sid=sid, client_id=client_id, scope_topic=None
+        )
+        rdbg_turn = (cands.retrieval or {}).get('debug_meta') or {}
+        if rdbg_turn.get('scope_widen_fallback'):
+            request.ctx['retrieval_scope_widen_fallback'] = True
+        sel = select_content_route(q=q, sid=sid, client_id=client_id, candidates=cands)
+        emit_bot_event(logger, 'content_arbiter_selected', status='ok', details=_slim_content_arbiter_details({'selected_kind': sel.kind, 'selected_route': sel.selected_route, 'selected_doc_id': sel.selected_doc_id, 'reason': sel.reason, 'debug_meta': sel.debug_meta, 'candidates': sel.candidates, 'rejected_candidates': sel.rejected_candidates}))
+        if sel.selected_route == 'catalog_md_first':
+            cat = cands.catalog
+            sid_svc = str(cat.get('matched_service_id') or '')
+            md_ref = _with_default_anchor(str(cat.get('md_entry_ref') or ''))
+            service = cat.get('service') or {}
+            price_line = _service_price_line_for_content(service, client_id)
+            price_applied = False
+            if md_ref:
+                ch = get_chunk_by_ref(md_ref, client_id=client_id)
+                if ch:
+                    log_json(logger, 'catalog_route', route='md_first', matched_service_id=sid_svc, match_score=cat.get('match_score'), md_entry_ref=md_ref)
+                    if sid_svc:
+                        set_last_catalog_service(sid, sid_svc)
+                    llm_q = q or f'Информация из {md_ref}'
+                    if price_line:
+                        llm_q = f'{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}'
+                        price_applied = True
+                    emit_bot_event(logger, 'content_arbiter_price_injection', status='ok', details={'selected_route': 'catalog_md_first', 'price_line_applied': bool(price_applied), 'md_entry_ref': md_ref, 'matched_service_id': sid_svc})
+                    return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llm_q, log_event='Answer generated from md_entry_ref', chunk_route='catalog_md_first', decision_frame=_orch_decision_dump(decision))
+        if sel.selected_route == 'catalog_facts':
+            cat = cands.catalog
+            svc = cat.get('service') or {}
+            sid_svc = str(cat.get('matched_service_id') or '')
+            payload = build_service_facts_card_payload(sid=sid, client_id=client_id, service_id=sid_svc, service=svc, match_score=float(cat.get('match_score') or 0.0), user_question=q)
+            price_line = _service_price_line_for_content(svc, client_id)
+            price_applied = False
+            if price_line:
+                base = (payload.get('answer') or '').strip()
+                payload['answer'] = f'{base}\n\n{price_line}' if base else price_line
+                payload.setdefault('meta', {})['price_display_applied'] = 'always'
+                price_applied = True
+            log_json(logger, 'catalog_route', route='facts', matched_service_id=sid_svc, match_score=cat.get('match_score'))
+            if sid_svc:
+                set_last_catalog_service(sid, sid_svc)
+            emit_bot_event(logger, 'content_arbiter_price_injection', status='ok', details={'selected_route': 'catalog_facts', 'price_line_applied': bool(price_applied), 'matched_service_id': sid_svc})
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='catalog_facts', decision_frame=_orch_decision_dump(decision))
+        if sel.selected_route == 'guided':
+            guided = _service_payload('Понял. Могу коротко подсказать и помочь выбрать направление — что для вас важнее?', sid, client_id, quick_replies=[{'label': 'Стоимость', 'ref': 'implantation__pricing__implants.md#korotko'}, {'label': 'Больно ли', 'ref': 'implantation__faq__pain.md#korotko'}, {'label': 'Сроки', 'ref': 'implantation__faq__duration.md#korotko'}, {'label': 'Подходит ли мне', 'ref': 'implantation__info__contraindications.md#korotko'}, {'label': 'Записаться', 'ref': 'clinic__info__consultation.md#korotko'}], cta={'text': 'Записаться', 'action': 'lead'})
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=guided, service_doc_id=None, service_track_user=True, service_route='guided', decision_frame=_orch_decision_dump(decision))
+        if sel.selected_route == 'retrieval_chunk' and isinstance(sel.selected_chunk, dict):
+            dmeta = cands.retrieval.get('debug_meta') or {} if isinstance(cands.retrieval, dict) else {}
+            _log_selection(q=q, chosen_chunk=sel.selected_chunk, chosen_score=sel.selected_chunk.get('_score'), original_top_score=dmeta.get('top_score'), rerank_applied=bool((cands.retrieval or {}).get('rerank_applied')))
+            return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=sel.selected_chunk, llm_question=None, log_event='Answer generated', chunk_route='retrieval_chunk', decision_frame=_orch_decision_dump(decision))
+        rmode = str((cands.retrieval or {}).get('mode') or '')
+        if rmode == 'no_candidates':
+            emit_bot_event(logger, 'retrieval_fallback', status='no_candidates', details={'reason': 'no_candidates', 'question_preview': (q or '')[:200], 'top_score': ((cands.retrieval or {}).get('debug_meta') or {}).get('top_score')})
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=no_candidates_response(), service_doc_id=None, service_track_user=True, service_route='retrieval_no_candidates', decision_frame=_orch_decision_dump(decision))
+        if rmode == 'low_score':
+            dmeta = cands.retrieval.get('debug_meta') or {} if isinstance(cands.retrieval, dict) else {}
+            emit_bot_event(logger, 'retrieval_fallback', status='low_score', details={'reason': 'low_score', 'question_preview': (q or '')[:200], 'top_score': dmeta.get('top_score'), 'threshold': dmeta.get('threshold'), 'alias_score': dmeta.get('alias_score'), 'top_candidate': dmeta.get('top_candidate'), 'query_user_raw': (dmeta.get('query_user_raw') or '')[:200]})
+            st_ls = mem_get(sid)
+            pls = low_score_response(sid, client_id)
+            pls = _apply_response_policy_compat(pls, st_ls, q, topic_state={}, doc_meta={}, pre_doc_turn_count=None, session_id=sid, client_id=client_id)
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=pls, service_doc_id=None, service_track_user=True, service_route='low_score_fallback', decision_frame=_orch_decision_dump(decision))
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=no_candidates_response(), service_doc_id=None, service_track_user=True, service_route='error', decision_frame=_orch_decision_dump(decision))
+    log_json(logger, 'Processing question', question=q[:100], question_length=len(q))
+    selection = select_chunk_for_question(
+        q, client_id=client_id, sid=sid, scope_topic=None
+    )
+    mode = selection.get('mode')
+    dmeta = selection.get('debug_meta') or {}
+    if dmeta.get('scope_widen_fallback'):
+        request.ctx['retrieval_scope_widen_fallback'] = True
+    if mode == 'no_candidates':
+        log_json(logger, 'No candidates found', question=q[:50])
+        emit_bot_event(logger, 'retrieval_fallback', status='no_candidates', details={'reason': 'no_candidates', 'question_preview': (q or '')[:200], 'top_score': dmeta.get('top_score')})
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=no_candidates_response(), service_doc_id=None, service_track_user=True, service_route='retrieval_no_candidates', decision_frame=_orch_decision_dump(decision))
+    if mode == 'low_score':
+        log_json(logger, 'low_score_fallback', **dmeta)
+        emit_bot_event(logger, 'retrieval_fallback', status='low_score', details={'reason': 'low_score', 'question_preview': (q or '')[:200], 'top_score': dmeta.get('top_score'), 'threshold': dmeta.get('threshold'), 'alias_score': dmeta.get('alias_score'), 'top_candidate': dmeta.get('top_candidate'), 'query_user_raw': (dmeta.get('query_user_raw') or '')[:200]})
+        st_ls = mem_get(sid)
+        pls = low_score_response(sid, client_id)
+        pls = _apply_response_policy_compat(pls, st_ls, q, topic_state={}, doc_meta={}, pre_doc_turn_count=None, session_id=sid, client_id=client_id)
+        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=pls, service_doc_id=None, service_track_user=True, service_route='low_score_fallback', decision_frame=_orch_decision_dump(decision))
+    if mode == 'chunk':
+        final_chunk = selection.get('chunk')
+        if not isinstance(final_chunk, dict):
+            log_json(logger, 'selection_invalid_chunk', debug_meta=dmeta)
+            emit_bot_event(logger, 'retrieval_fallback', status='invalid_chunk', details={'reason': 'selection_invalid_chunk', 'question_preview': (q or '')[:200], 'debug_meta': dmeta})
+            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=no_candidates_response(), service_doc_id=None, service_track_user=True, service_route='error', decision_frame=_orch_decision_dump(decision))
+        if dmeta.get('selected_by') == 'alias':
+            log_json(logger, 'alias_hit_selected', alias_score=dmeta.get('alias_score'), file=final_chunk.get('file'), h2_id=final_chunk.get('h2_id'), h3_id=final_chunk.get('h3_id'))
+        _log_selection(q=q, chosen_chunk=final_chunk, chosen_score=final_chunk.get('_score'), original_top_score=dmeta.get('top_score'), rerank_applied=bool(selection.get('rerank_applied')))
+        return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=final_chunk, llm_question=None, log_event='Answer generated', chunk_route='retrieval_chunk', decision_frame=_orch_decision_dump(decision))
+    log_json(logger, 'selection_unknown_mode', mode=mode, debug_meta=dmeta)
+    emit_bot_event(logger, 'retrieval_fallback', status='unknown_mode', details={'reason': 'selection_unknown_mode', 'mode': mode, 'question_preview': (q or '')[:200], 'debug_meta': dmeta})
+    return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=no_candidates_response(), service_doc_id=None, service_track_user=True, service_route='error', decision_frame=_orch_decision_dump(decision))
+
+
+def _dispatch_orchestration_json(orch_r: AskOrchestrationResult):
+    """JSON-ответ для /ask (как до рефакторинга)."""
+    if orch_r.kind == "unknown_client":
+        return jsonify(orch_r.client_error or {"error": "unknown_client"}), orch_r.http_status
+    if orch_r.kind == "reset_session":
+        return safe_jsonify(reset_session_response(orch_r.sid))
+    if orch_r.kind == "service_reply":
+        resp = _service_reply(
+            orch_r.service_payload,
+            orch_r.sid,
+            orch_r.q,
+            doc_id=orch_r.service_doc_id,
+            track_user=orch_r.service_track_user,
+            route=orch_r.service_route,
+        )
+        if orch_r.http_status != 200:
+            return resp, orch_r.http_status
+        return resp
+    if orch_r.kind == "chunk":
+        return respond_from_chunk(
+            chunk=orch_r.chosen_chunk,
+            q=orch_r.q,
+            sid=orch_r.sid,
+            client_id=orch_r.client_id,
+            finalize_ask=finalize_ask,
+            safe_jsonify=safe_jsonify,
+            logger=logger,
+            llm_question=orch_r.llm_question,
+            log_event=orch_r.log_event,
+            route=orch_r.chunk_route,
+        )
+    raise RuntimeError(f"bad orchestration kind: {orch_r.kind}")
+
 @app.post("/ask")
 def ask():
     q = ""
     request.ctx["turn_t0_monotonic"] = time.monotonic()
     try:
         data = request.get_json(force=True) or {}
-        client_id = resolve_client_id(data.get("client_id"))
-        if client_id is None:
-            return jsonify({"error": "unknown_client"}), 403
-
-        q_raw = data.get("q") or ""
-        q = (q_raw or "").strip()
-        ref = (data.get("ref") or "").strip()
-        sid = sid_from_body(data)
-
-        if q and q.lower() in ("/reset", "/новая"):
-            mem_reset(sid)
-            return safe_jsonify(reset_session_response(sid))
-        q, truncated = _normalize_question_text(q_raw)
-        _bind_chat_ctx(sid, client_id)
-        if truncated:
-            log_json(logger, "input_truncated", sid=sid, client_id=client_id, original_len=len((q_raw or "").strip()), max_len=INPUT_MAX_CHARS)
-        ip = _resolve_request_ip()
-        if not _check_rate_limit(ip):
-            log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
-            return _service_reply(_rate_limited_response_payload(), sid, q, route="rate_limited"), 429
-        if _is_obvious_noise(q):
-            log_json(logger, "obvious_noise_short_circuit", sid=sid, client_id=client_id)
-            return _service_reply(_obvious_noise_payload(sid, client_id), sid, q, route="noise_short_circuit")
-        if q:
-            hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
-            label = str(hf.get("label") or "").lower()
-            reason = str(hf.get("reason") or "unspecified").lower()
-            confidence = float(hf.get("confidence") or 0.0)
-            is_handoff = label == "handoff"
-            log_json(
-                logger,
-                "handoff_filter_gate",
-                sid=sid,
-                client_id=client_id,
-                label=label,
-                reason=reason[:64],
-                confidence=round(confidence, 4),
-                is_handoff=is_handoff,
-            )
-            if is_handoff:
-                return _service_reply(
-                    _handoff_filter_payload(
-                        sid=sid,
-                        client_id=client_id,
-                        reason=reason,
-                    ),
-                    sid,
-                    q,
-                    route="handoff_filter",
-                )
-
-        st = mem_get(sid)
-
-        flow_result = handle_flows(
-            data=data,
-            st=st,
-            sid=sid,
-            q=q,
-            client_id=client_id,
-            txt=TXT,
-            service_payload=_service_payload,
-            get_last_content_ui_payload=_get_last_content_ui_payload_compat,
-            get_topic_state=get_topic_state,
-        )
-        if flow_result is not None:
-            redirect_ref = (flow_result.get("redirect_ref") or "").strip()
-            if redirect_ref:
-                ch = get_chunk_by_ref(redirect_ref, client_id=client_id)
-                if ch:
-                    return respond_from_chunk(
-                        chunk=ch,
-                        q=q,
-                        sid=sid,
-                        client_id=client_id,
-                        finalize_ask=finalize_ask,
-                        safe_jsonify=safe_jsonify,
-                        logger=logger,
-                        llm_question=q or f"Информация из {redirect_ref}",
-                        log_event="Answer generated from flow redirect_ref",
-                        route="flow_redirect_ref",
-                    )
-            return _service_reply(
-                flow_result["payload"],
-                sid,
-                q,
-                doc_id=flow_result.get("doc_id"),
-                route="lead_flow",
-            )
-
-        st = mem_get(sid)
-        if _is_duplicate_question(st, q):
-            snap = _get_last_content_ui_payload_compat(sid)
-            log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
-            return _service_reply(_duplicate_payload(sid, client_id, snap), sid, q, route="duplicate_short_circuit")
-        if _is_message_burst(st):
-            set_anti_spam_redirect_shown(sid, True)
-            log_json(
-                logger,
-                "anti_spam_burst_redirect",
-                sid=sid,
-                client_id=client_id,
-                burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC,
-                burst_messages=ANTI_SPAM_BURST_MESSAGES,
-            )
-            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
-        if _should_soft_redirect_no_intent(st):
-            set_anti_spam_redirect_shown(sid, True)
-            log_json(
-                logger,
-                "anti_spam_soft_redirect",
-                sid=sid,
-                client_id=client_id,
-                session_turn_count=int(st.get("session_turn_count") or 0),
-            )
-            return _service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
-
-        if ref:
-            ch = get_chunk_by_ref(ref, client_id=client_id)
-            if ch:
-                return respond_from_chunk(
-                    chunk=ch,
-                    q=q,
-                    sid=sid,
-                    client_id=client_id,
-                    finalize_ask=finalize_ask,
-                    safe_jsonify=safe_jsonify,
-                    logger=logger,
-                    llm_question=q or f"Информация из {ref}",
-                    log_event="Answer generated from ref",
-                    route="retrieval_chunk",
-                )
-
-        if not q:
-            return _service_reply(empty_question_response(), sid, q, track_user=False, route="error")
-
-        # Короткие реплики без явного интента — обрабатываем через контекст сессии.
-        # Предотвращает падение "да", "понятно", "хорошо" в retrieval с низким score.
-        if _is_short_contextual(q, st):
-            current_doc_id = (st.get("current_doc_id") or "").strip()
-            if current_doc_id:
-                ch = get_chunk_by_ref(f"{current_doc_id}#korotko", client_id=client_id)
-                if ch:
-                    return respond_from_chunk(
-                        chunk=ch,
-                        q=q,
-                        sid=sid,
-                        client_id=client_id,
-                        finalize_ask=finalize_ask,
-                        safe_jsonify=safe_jsonify,
-                        logger=logger,
-                        llm_question=q,
-                        log_event="Answer from short_contextual fallback",
-                        route="retrieval_chunk",
-                    )
-
-        # v5 Resolver PR #1.2 (safety-net): branch on DecisionFrame.route_intent; v4 classify_intent on bypass.
-        resolver_bypassed_env = _is_resolver_bypassed_env()
-        decision = None
-        safety_net_used: list[str] = []
-
-        if resolver_bypassed_env:
-            log_json(logger, "resolver_bypassed_env", sid=sid, client_id=client_id)
-            intent = classify_intent(q, client_id=client_id, sid=sid)
-            request.ctx["resolver_used"] = False
-            request.ctx["safety_net_used"] = False
-            maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
-            _enqueue_v5_resolver_trace(decision=None, safety_net_used=[], resolver_bypassed_env=True)
-        else:
-            hist = list((st or {}).get("hist") or [])
-            decision, safety_net_used = resolve_with_fallback(
-                question=q,
-                history=hist,
-                client_id=client_id,
-                sid=sid,
-                session_state=st,
-            )
-            request.ctx["resolver_used"] = True
-            request.ctx["safety_net_used"] = bool(safety_net_used)
-            emit_bot_event(
-                logger,
-                "v5_decision_frame_used",
-                status="ok",
-                details={
-                    "decision_frame": decision.model_dump(),
-                    "safety_net_used": safety_net_used,
-                    "resolver_bypassed_env": False,
-                },
-            )
-            _enqueue_v5_resolver_trace(
-                decision=decision,
-                safety_net_used=safety_net_used,
-                resolver_bypassed_env=False,
-            )
-            ri = str(decision.route_intent or "").strip().lower()
-            if ri in ("price_lookup", "price_concern"):
-                intent = ri
-            else:
-                intent = "content"
-
-        if intent == "offtopic":
-            return _service_reply(offtopic_response(), sid, q, route="offtopic")
-
-        if intent == "contacts":
-            cands = retrieve(q, topk=4, client_id=client_id)
-            picked = pick_contacts_chunk(cands)
-            if picked:
-                return respond_from_chunk(
-                    chunk=picked,
-                    q=q,
-                    sid=sid,
-                    client_id=client_id,
-                    finalize_ask=finalize_ask,
-                    safe_jsonify=safe_jsonify,
-                    logger=logger,
-                    llm_question=q,
-                    log_event="Answer generated from contacts intent",
-                    route="contacts_chunk",
-                )
-
-        if intent in ("price_lookup", "price_concern"):
-            price_route = select_price_service_route(
-                q,
-                client_id=client_id,
-                sid=sid,
-                intent_override=intent,
-            )
-            if price_route.get("mode") == "clarify":
-                payload = build_price_clarify_payload(
-                    sid=sid,
-                    client_id=client_id,
-                    intent=str(price_route.get("intent") or "other"),
-                    fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
-                )
-                log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _service_reply(payload, sid, q, route="price_lookup")
-            if price_route.get("mode") == "matched":
-                intent = str(price_route.get("intent") or "other")
-                service = price_route.get("service") or {}
-                service_id = str(price_route.get("matched_service_id") or "")
-                match_score = float(price_route.get("match_score") or 0.0)
-                route_source = str(price_route.get("route_source") or "catalog")
-                if service_id:
-                    set_last_catalog_service(sid, service_id)
-                if intent == "price_concern":
-                    concern_ref = str(service.get("concern_ref") or "").strip()
-                    if concern_ref:
-                        ch = get_chunk_by_ref(concern_ref, client_id=client_id)
-                        if ch:
-                            log_json(
-                                logger,
-                                "price_route",
-                                intent="price_concern",
-                                matched_service_id=service_id,
-                                match_score=round(match_score, 4),
-                                route_source="concern_ref",
-                                concern_ref=concern_ref,
-                                fallback_reason=None,
-                            )
-                            return respond_from_chunk(
-                                chunk=ch,
-                                q=q,
-                                sid=sid,
-                                client_id=client_id,
-                                finalize_ask=finalize_ask,
-                                safe_jsonify=safe_jsonify,
-                                logger=logger,
-                                llm_question=q,
-                                log_event="Answer generated from concern_ref",
-                                route="price_concern",
-                            )
-                    payload = build_price_concern_payload(
-                        sid=sid,
-                        client_id=client_id,
-                        service_id=service_id,
-                        service=service,
-                        match_score=match_score,
-                    )
-                    log_json(logger, "price_route", **(payload.get("meta") or {}))
-                    return _service_reply(payload, sid, q, route="price_concern")
-                if route_source == "price_ref" and price_route.get("price_ref"):
-                    ref = str(price_route.get("price_ref") or "").strip()
-                    ch = get_chunk_by_ref(ref, client_id=client_id)
-                    if ch:
-                        log_json(
-                            logger,
-                            "price_route",
-                            intent="price_lookup",
-                            matched_service_id=service_id,
-                            match_score=round(match_score, 4),
-                            route_source="price_ref",
-                            price_key=price_route.get("price_key"),
-                            price_ref=ref,
-                            fallback_reason=None,
-                        )
-                        return respond_from_chunk(
-                            chunk=ch,
-                            q=q,
-                            sid=sid,
-                            client_id=client_id,
-                            finalize_ask=finalize_ask,
-                            safe_jsonify=safe_jsonify,
-                            logger=logger,
-                            llm_question=q or f"Цена по {ref}",
-                            log_event="Answer generated from price_ref",
-                            route="price_lookup",
-                        )
-                payload = build_price_lookup_payload(
-                    sid=sid,
-                    client_id=client_id,
-                    service_id=service_id,
-                    service=service,
-                    match_score=match_score,
-                    route_source=route_source,
-                    price_key=price_route.get("price_key"),
-                    price_ref=price_route.get("price_ref"),
-                    price_item=price_route.get("price_item"),
-                )
-                log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _service_reply(payload, sid, q, route="price_lookup")
-
-        if intent == "content":
-            cands = collect_content_candidates(q=q, sid=sid, client_id=client_id)
-            sel = select_content_route(q=q, sid=sid, client_id=client_id, candidates=cands)
-            emit_bot_event(
-                logger,
-                "content_arbiter_selected",
-                status="ok",
-                details=_slim_content_arbiter_details({
-                    "selected_kind": sel.kind,
-                    "selected_route": sel.selected_route,
-                    "selected_doc_id": sel.selected_doc_id,
-                    "reason": sel.reason,
-                    "debug_meta": sel.debug_meta,
-                    "candidates": sel.candidates,
-                    "rejected_candidates": sel.rejected_candidates,
-                }),
-            )
-
-            if sel.selected_route == "catalog_md_first":
-                cat = cands.catalog
-                sid_svc = str(cat.get("matched_service_id") or "")
-                md_ref = _with_default_anchor(str(cat.get("md_entry_ref") or ""))
-                service = cat.get("service") or {}
-                price_line = _service_price_line_for_content(service, client_id)
-                price_applied = False
-                if md_ref:
-                    ch = get_chunk_by_ref(md_ref, client_id=client_id)
-                    if ch:
-                        log_json(
-                            logger,
-                            "catalog_route",
-                            route="md_first",
-                            matched_service_id=sid_svc,
-                            match_score=cat.get("match_score"),
-                            md_entry_ref=md_ref,
-                        )
-                        if sid_svc:
-                            set_last_catalog_service(sid, sid_svc)
-                        llm_q = q or f"Информация из {md_ref}"
-                        if price_line:
-                            llm_q = f"{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}"
-                            price_applied = True
-                        emit_bot_event(
-                            logger,
-                            "content_arbiter_price_injection",
-                            status="ok",
-                            details={
-                                "selected_route": "catalog_md_first",
-                                "price_line_applied": bool(price_applied),
-                                "md_entry_ref": md_ref,
-                                "matched_service_id": sid_svc,
-                            },
-                        )
-                        return respond_from_chunk(
-                            chunk=ch,
-                            q=q,
-                            sid=sid,
-                            client_id=client_id,
-                            finalize_ask=finalize_ask,
-                            safe_jsonify=safe_jsonify,
-                            logger=logger,
-                            llm_question=llm_q,
-                            log_event="Answer generated from md_entry_ref",
-                            route="catalog_md_first",
-                        )
-
-            if sel.selected_route == "catalog_facts":
-                cat = cands.catalog
-                svc = cat.get("service") or {}
-                sid_svc = str(cat.get("matched_service_id") or "")
-                payload = build_service_facts_card_payload(
-                    sid=sid,
-                    client_id=client_id,
-                    service_id=sid_svc,
-                    service=svc,
-                    match_score=float(cat.get("match_score") or 0.0),
-                    user_question=q,
-                )
-                price_line = _service_price_line_for_content(svc, client_id)
-                price_applied = False
-                if price_line:
-                    base = (payload.get("answer") or "").strip()
-                    payload["answer"] = f"{base}\n\n{price_line}" if base else price_line
-                    payload.setdefault("meta", {})["price_display_applied"] = "always"
-                    price_applied = True
-                log_json(
-                    logger,
-                    "catalog_route",
-                    route="facts",
-                    matched_service_id=sid_svc,
-                    match_score=cat.get("match_score"),
-                )
-                if sid_svc:
-                    set_last_catalog_service(sid, sid_svc)
-                emit_bot_event(
-                    logger,
-                    "content_arbiter_price_injection",
-                    status="ok",
-                    details={
-                        "selected_route": "catalog_facts",
-                        "price_line_applied": bool(price_applied),
-                        "matched_service_id": sid_svc,
-                    },
-                )
-                return _service_reply(payload, sid, q, doc_id=None, route="catalog_facts")
-
-            if sel.selected_route == "guided":
-                guided = _service_payload(
-                    "Понял. Могу коротко подсказать и помочь выбрать направление — что для вас важнее?",
-                    sid,
-                    client_id,
-                    quick_replies=[
-                        {"label": "Стоимость", "ref": "implantation__pricing__implants.md#korotko"},
-                        {"label": "Больно ли", "ref": "implantation__faq__pain.md#korotko"},
-                        {"label": "Сроки", "ref": "implantation__faq__duration.md#korotko"},
-                        {"label": "Подходит ли мне", "ref": "implantation__info__contraindications.md#korotko"},
-                        {"label": "Записаться", "ref": "clinic__info__consultation.md#korotko"},
-                    ],
-                    cta={"text": "Записаться", "action": "lead"},
-                )
-                return _service_reply(guided, sid, q, doc_id=None, route="guided")
-
-            if sel.selected_route == "retrieval_chunk" and isinstance(sel.selected_chunk, dict):
-                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
-                _log_selection(
-                    q=q,
-                    chosen_chunk=sel.selected_chunk,
-                    chosen_score=sel.selected_chunk.get("_score"),
-                    original_top_score=dmeta.get("top_score"),
-                    rerank_applied=bool((cands.retrieval or {}).get("rerank_applied")),
-                )
-                return respond_from_chunk(
-                    chunk=sel.selected_chunk,
-                    q=q,
-                    sid=sid,
-                    client_id=client_id,
-                    finalize_ask=finalize_ask,
-                    safe_jsonify=safe_jsonify,
-                    logger=logger,
-                    route="retrieval_chunk",
-                )
-
-            # If retrieval was executed but yielded no chunk, handle it here to avoid a second retrieval.
-            rmode = str((cands.retrieval or {}).get("mode") or "")
-            if rmode == "no_candidates":
-                emit_bot_event(
-                    logger,
-                    "retrieval_fallback",
-                    status="no_candidates",
-                    details={
-                        "reason": "no_candidates",
-                        "question_preview": (q or "")[:200],
-                        "top_score": ((cands.retrieval or {}).get("debug_meta") or {}).get("top_score"),
-                    },
-                )
-                return _service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
-            if rmode == "low_score":
-                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
-                emit_bot_event(
-                    logger,
-                    "retrieval_fallback",
-                    status="low_score",
-                    details={
-                        "reason": "low_score",
-                        "question_preview": (q or "")[:200],
-                        "top_score": dmeta.get("top_score"),
-                        "threshold": dmeta.get("threshold"),
-                        "alias_score": dmeta.get("alias_score"),
-                        "top_candidate": dmeta.get("top_candidate"),
-                        "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
-                    },
-                )
-                st_ls = mem_get(sid)
-                pls = low_score_response(sid, client_id)
-                pls = _apply_response_policy_compat(
-                    pls,
-                    st_ls,
-                    q,
-                    topic_state={},
-                    doc_meta={},
-                    pre_doc_turn_count=None,
-                    session_id=sid,
-                    client_id=client_id,
-                )
-                return _service_reply(pls, sid, q, route="low_score_fallback")
-
-            # As a safe fallback for content, do not run a second retrieval.
-            return _service_reply(no_candidates_response(), sid, q, route="error")
-
-        log_json(logger, "Processing question", question=q[:100], question_length=len(q))
-        selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
-        mode = selection.get("mode")
-        dmeta = selection.get("debug_meta") or {}
-        if mode == "no_candidates":
-            log_json(logger, "No candidates found", question=q[:50])
-            emit_bot_event(
-                logger,
-                "retrieval_fallback",
-                status="no_candidates",
-                details={
-                    "reason": "no_candidates",
-                    "question_preview": (q or "")[:200],
-                    "top_score": dmeta.get("top_score"),
-                },
-            )
-            return _service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
-        if mode == "low_score":
-            log_json(logger, "low_score_fallback", **dmeta)
-            emit_bot_event(
-                logger,
-                "retrieval_fallback",
-                status="low_score",
-                details={
-                    "reason": "low_score",
-                    "question_preview": (q or "")[:200],
-                    "top_score": dmeta.get("top_score"),
-                    "threshold": dmeta.get("threshold"),
-                    "alias_score": dmeta.get("alias_score"),
-                    "top_candidate": dmeta.get("top_candidate"),
-                    "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
-                },
-            )
-            st_ls = mem_get(sid)
-            pls = low_score_response(sid, client_id)
-            pls = _apply_response_policy_compat(
-                pls,
-                st_ls,
-                q,
-                topic_state={},
-                doc_meta={},
-                pre_doc_turn_count=None,
-                session_id=sid,
-                client_id=client_id,
-            )
-            return _service_reply(pls, sid, q, route="low_score_fallback")
-        if mode == "chunk":
-            final_chunk = selection.get("chunk")
-            if not isinstance(final_chunk, dict):
-                log_json(logger, "selection_invalid_chunk", debug_meta=dmeta)
-                emit_bot_event(
-                    logger,
-                    "retrieval_fallback",
-                    status="invalid_chunk",
-                    details={
-                        "reason": "selection_invalid_chunk",
-                        "question_preview": (q or "")[:200],
-                        "debug_meta": dmeta,
-                    },
-                )
-                return _service_reply(no_candidates_response(), sid, q, route="error")
-            if dmeta.get("selected_by") == "alias":
-                log_json(
-                    logger,
-                    "alias_hit_selected",
-                    alias_score=dmeta.get("alias_score"),
-                    file=final_chunk.get("file"),
-                    h2_id=final_chunk.get("h2_id"),
-                    h3_id=final_chunk.get("h3_id"),
-                )
-            _log_selection(
-                q=q,
-                chosen_chunk=final_chunk,
-                chosen_score=final_chunk.get("_score"),
-                original_top_score=dmeta.get("top_score"),
-                rerank_applied=bool(selection.get("rerank_applied")),
-            )
-            return respond_from_chunk(
-                chunk=final_chunk,
-                q=q,
-                sid=sid,
-                client_id=client_id,
-                finalize_ask=finalize_ask,
-                safe_jsonify=safe_jsonify,
-                logger=logger,
-                route="retrieval_chunk",
-            )
-        log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
-        emit_bot_event(
-            logger,
-            "retrieval_fallback",
-            status="unknown_mode",
-            details={
-                "reason": "selection_unknown_mode",
-                "mode": mode,
-                "question_preview": (q or "")[:200],
-                "debug_meta": dmeta,
-            },
-        )
-        return _service_reply(no_candidates_response(), sid, q, route="error")
-
+        orch_r = _orchestrate_ask_turn(data)
+        q = orch_r.q or ""
+        return _dispatch_orchestration_json(orch_r)
     except Exception as e:
         logger.exception("ask_failed", extra={"q": q, "err": str(e)})
         if request.ctx.get("sid") and (q or "").strip():
@@ -1506,6 +1223,10 @@ def ask():
                     "answer_chars": 0,
                     "latency_ms": None,
                     "fallback_reason": "ask_failed",
+                    "retrieval_scope_topic": None,
+                    "retrieval_scope_widen_fallback": False,
+                    "legacy_intent": None,
+                    "effective_intent": "",
                 },
             )
         emit_bot_event(
@@ -1515,7 +1236,6 @@ def ask():
             details={"error": str(e)[:500], "question_preview": (q or "")[:200]},
         )
         return safe_jsonify(internal_error_response()), 200
-
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -1585,6 +1305,37 @@ def _sse_chunk_response(
     )
 
 
+def _dispatch_orchestration_sse(orch_r: AskOrchestrationResult):
+    """SSE-упаковка результата оркестратора (как исторический /ask/stream)."""
+    if orch_r.kind == "unknown_client":
+        return jsonify(orch_r.client_error or {"error": "unknown_client"}), orch_r.http_status
+    if orch_r.kind == "reset_session":
+        return safe_jsonify(reset_session_response(orch_r.sid))
+    if orch_r.kind == "service_reply":
+        resp = _sse_service_reply(
+            orch_r.service_payload,
+            orch_r.sid,
+            orch_r.q,
+            doc_id=orch_r.service_doc_id,
+            track_user=orch_r.service_track_user,
+            route=orch_r.service_route,
+        )
+        if orch_r.http_status != 200:
+            return resp, orch_r.http_status
+        return resp
+    if orch_r.kind == "chunk":
+        return _sse_chunk_response(
+            orch_r.chosen_chunk,
+            orch_r.q,
+            orch_r.sid,
+            orch_r.client_id,
+            llm_question=orch_r.llm_question,
+            log_event=orch_r.log_event,
+            route=orch_r.chunk_route,
+        )
+    raise RuntimeError(f"bad orchestration kind: {orch_r.kind}")
+
+
 @app.post("/ask/stream")
 def ask_stream():
     """Стриминговый вариант /ask. Протокол SSE:
@@ -1597,537 +1348,9 @@ def ask_stream():
     request.ctx["turn_t0_monotonic"] = time.monotonic()
     try:
         data = request.get_json(force=True) or {}
-        client_id = resolve_client_id(data.get("client_id"))
-        if client_id is None:
-            return jsonify({"error": "unknown_client"}), 403
-
-        q_raw = data.get("q") or ""
-        q = (q_raw or "").strip()
-        ref = (data.get("ref") or "").strip()
-        sid = sid_from_body(data)
-
-        if q and q.lower() in ("/reset", "/новая"):
-            mem_reset(sid)
-            return safe_jsonify(reset_session_response(sid))
-        q, truncated = _normalize_question_text(q_raw)
-        _bind_chat_ctx(sid, client_id)
-        if truncated:
-            log_json(logger, "input_truncated", sid=sid, client_id=client_id, original_len=len((q_raw or "").strip()), max_len=INPUT_MAX_CHARS)
-        ip = _resolve_request_ip()
-        if not _check_rate_limit(ip):
-            log_json(logger, "rate_limited", sid=sid, client_id=client_id, ip=ip)
-            return _sse_service_reply(_rate_limited_response_payload(), sid, q, route="rate_limited"), 429
-        if _is_obvious_noise(q):
-            log_json(logger, "obvious_noise_short_circuit", sid=sid, client_id=client_id)
-            return _sse_service_reply(_obvious_noise_payload(sid, client_id), sid, q, route="noise_short_circuit")
-        if q:
-            hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
-            label = str(hf.get("label") or "").lower()
-            reason = str(hf.get("reason") or "unspecified").lower()
-            confidence = float(hf.get("confidence") or 0.0)
-            is_handoff = label == "handoff"
-            log_json(
-                logger,
-                "handoff_filter_gate",
-                sid=sid,
-                client_id=client_id,
-                label=label,
-                reason=reason[:64],
-                confidence=round(confidence, 4),
-                is_handoff=is_handoff,
-            )
-            if is_handoff:
-                return _sse_service_reply(
-                    _handoff_filter_payload(
-                        sid=sid,
-                        client_id=client_id,
-                        reason=reason,
-                    ),
-                    sid,
-                    q,
-                    route="handoff_filter",
-                )
-
-        st = mem_get(sid)
-
-        flow_result = handle_flows(
-            data=data,
-            st=st,
-            sid=sid,
-            q=q,
-            client_id=client_id,
-            txt=TXT,
-            service_payload=_service_payload,
-            get_last_content_ui_payload=_get_last_content_ui_payload_compat,
-            get_topic_state=get_topic_state,
-        )
-        if flow_result is not None:
-            redirect_ref = (flow_result.get("redirect_ref") or "").strip()
-            if redirect_ref:
-                ch = get_chunk_by_ref(redirect_ref, client_id=client_id)
-                if ch:
-                    return _sse_chunk_response(
-                        ch, q, sid, client_id,
-                        llm_question=q or f"Информация из {redirect_ref}",
-                        log_event="Answer generated from flow redirect_ref",
-                        route="flow_redirect_ref",
-                    )
-            return _sse_service_reply(
-                flow_result["payload"], sid, q, doc_id=flow_result.get("doc_id"), route="lead_flow"
-            )
-
-        st = mem_get(sid)
-        if _is_duplicate_question(st, q):
-            snap = _get_last_content_ui_payload_compat(sid)
-            log_json(logger, "duplicate_short_circuit", sid=sid, client_id=client_id)
-            return _sse_service_reply(_duplicate_payload(sid, client_id, snap), sid, q, route="duplicate_short_circuit")
-        if _is_message_burst(st):
-            set_anti_spam_redirect_shown(sid, True)
-            log_json(
-                logger,
-                "anti_spam_burst_redirect",
-                sid=sid,
-                client_id=client_id,
-                burst_window_sec=ANTI_SPAM_BURST_WINDOW_SEC,
-                burst_messages=ANTI_SPAM_BURST_MESSAGES,
-            )
-            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
-        if _should_soft_redirect_no_intent(st):
-            set_anti_spam_redirect_shown(sid, True)
-            log_json(
-                logger,
-                "anti_spam_soft_redirect",
-                sid=sid,
-                client_id=client_id,
-                session_turn_count=int(st.get("session_turn_count") or 0),
-            )
-            return _sse_service_reply(_soft_redirect_payload(sid, client_id), sid, q, route="booking_flow")
-
-        if ref:
-            ch = get_chunk_by_ref(ref, client_id=client_id)
-            if ch:
-                return _sse_chunk_response(
-                    ch, q, sid, client_id,
-                    llm_question=q or f"Информация из {ref}",
-                    log_event="Answer generated from ref",
-                    route="retrieval_chunk",
-                )
-
-        if not q:
-            return _sse_service_reply(empty_question_response(), sid, q, track_user=False, route="error")
-
-        if _is_short_contextual(q, st):
-            current_doc_id = (st.get("current_doc_id") or "").strip()
-            if current_doc_id:
-                ch = get_chunk_by_ref(f"{current_doc_id}#korotko", client_id=client_id)
-                if ch:
-                    return _sse_chunk_response(
-                        ch, q, sid, client_id,
-                        log_event="Answer from short_contextual fallback",
-                        route="retrieval_chunk",
-                    )
-
-        resolver_bypassed_env = _is_resolver_bypassed_env()
-        decision = None
-        safety_net_used: list[str] = []
-
-        if resolver_bypassed_env:
-            log_json(logger, "resolver_bypassed_env", sid=sid, client_id=client_id)
-            intent = classify_intent(q, client_id=client_id, sid=sid)
-            request.ctx["resolver_used"] = False
-            request.ctx["safety_net_used"] = False
-            maybe_start_shadow_resolver(question=q, sid=sid, client_id=client_id)
-            _enqueue_v5_resolver_trace(decision=None, safety_net_used=[], resolver_bypassed_env=True)
-        else:
-            hist = list((st or {}).get("hist") or [])
-            decision, safety_net_used = resolve_with_fallback(
-                question=q,
-                history=hist,
-                client_id=client_id,
-                sid=sid,
-                session_state=st,
-            )
-            request.ctx["resolver_used"] = True
-            request.ctx["safety_net_used"] = bool(safety_net_used)
-            emit_bot_event(
-                logger,
-                "v5_decision_frame_used",
-                status="ok",
-                details={
-                    "decision_frame": decision.model_dump(),
-                    "safety_net_used": safety_net_used,
-                    "resolver_bypassed_env": False,
-                },
-            )
-            _enqueue_v5_resolver_trace(
-                decision=decision,
-                safety_net_used=safety_net_used,
-                resolver_bypassed_env=False,
-            )
-            ri = str(decision.route_intent or "").strip().lower()
-            if ri in ("price_lookup", "price_concern"):
-                intent = ri
-            else:
-                intent = "content"
-
-        if intent == "offtopic":
-            return _sse_service_reply(offtopic_response(), sid, q, route="offtopic")
-
-        if intent == "contacts":
-            cands = retrieve(q, topk=4, client_id=client_id)
-            picked = pick_contacts_chunk(cands)
-            if picked:
-                return _sse_chunk_response(
-                    picked, q, sid, client_id,
-                    log_event="Answer generated from contacts intent",
-                    route="contacts_chunk",
-                )
-
-        if intent in ("price_lookup", "price_concern"):
-            price_route = select_price_service_route(
-                q, client_id=client_id, sid=sid, intent_override=intent,
-            )
-            if price_route.get("mode") == "clarify":
-                payload = build_price_clarify_payload(
-                    sid=sid,
-                    client_id=client_id,
-                    intent=str(price_route.get("intent") or "other"),
-                    fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
-                )
-                log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _sse_service_reply(payload, sid, q, route="price_lookup")
-            if price_route.get("mode") == "matched":
-                intent = str(price_route.get("intent") or "other")
-                service = price_route.get("service") or {}
-                service_id = str(price_route.get("matched_service_id") or "")
-                match_score = float(price_route.get("match_score") or 0.0)
-                route_source = str(price_route.get("route_source") or "catalog")
-                if service_id:
-                    set_last_catalog_service(sid, service_id)
-                if intent == "price_concern":
-                    concern_ref = str(service.get("concern_ref") or "").strip()
-                    if concern_ref:
-                        ch = get_chunk_by_ref(concern_ref, client_id=client_id)
-                        if ch:
-                            log_json(
-                                logger, "price_route",
-                                intent="price_concern",
-                                matched_service_id=service_id,
-                                match_score=round(match_score, 4),
-                                route_source="concern_ref",
-                                concern_ref=concern_ref,
-                                fallback_reason=None,
-                            )
-                            return _sse_chunk_response(
-                                ch, q, sid, client_id,
-                                log_event="Answer generated from concern_ref",
-                                route="price_concern",
-                            )
-                    payload = build_price_concern_payload(
-                        sid=sid, client_id=client_id,
-                        service_id=service_id, service=service, match_score=match_score,
-                    )
-                    log_json(logger, "price_route", **(payload.get("meta") or {}))
-                    return _sse_service_reply(payload, sid, q, route="price_concern")
-                if route_source == "price_ref" and price_route.get("price_ref"):
-                    ref = str(price_route.get("price_ref") or "").strip()
-                    ch = get_chunk_by_ref(ref, client_id=client_id)
-                    if ch:
-                        log_json(
-                            logger, "price_route",
-                            intent="price_lookup",
-                            matched_service_id=service_id,
-                            match_score=round(match_score, 4),
-                            route_source="price_ref",
-                            price_key=price_route.get("price_key"),
-                            price_ref=ref,
-                            fallback_reason=None,
-                        )
-                        return _sse_chunk_response(
-                            ch, q, sid, client_id,
-                            llm_question=q or f"Цена по {ref}",
-                            log_event="Answer generated from price_ref",
-                            route="price_lookup",
-                        )
-                payload = build_price_lookup_payload(
-                    sid=sid, client_id=client_id,
-                    service_id=service_id, service=service, match_score=match_score,
-                    route_source=route_source,
-                    price_key=price_route.get("price_key"),
-                    price_ref=price_route.get("price_ref"),
-                    price_item=price_route.get("price_item"),
-                )
-                log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _sse_service_reply(payload, sid, q, route="price_lookup")
-
-        if intent == "content":
-            cands = collect_content_candidates(q=q, sid=sid, client_id=client_id)
-            sel = select_content_route(q=q, sid=sid, client_id=client_id, candidates=cands)
-            emit_bot_event(
-                logger,
-                "content_arbiter_selected",
-                status="ok",
-                details=_slim_content_arbiter_details({
-                    "selected_kind": sel.kind,
-                    "selected_route": sel.selected_route,
-                    "selected_doc_id": sel.selected_doc_id,
-                    "reason": sel.reason,
-                    "debug_meta": sel.debug_meta,
-                    "candidates": sel.candidates,
-                    "rejected_candidates": sel.rejected_candidates,
-                }),
-            )
-
-            if sel.selected_route == "catalog_md_first":
-                cat = cands.catalog
-                sid_svc = str(cat.get("matched_service_id") or "")
-                md_ref = _with_default_anchor(str(cat.get("md_entry_ref") or ""))
-                service = cat.get("service") or {}
-                price_line = _service_price_line_for_content(service, client_id)
-                price_applied = False
-                if md_ref:
-                    ch = get_chunk_by_ref(md_ref, client_id=client_id)
-                    if ch:
-                        log_json(
-                            logger,
-                            "catalog_route",
-                            route="md_first",
-                            matched_service_id=sid_svc,
-                            match_score=cat.get("match_score"),
-                            md_entry_ref=md_ref,
-                        )
-                        if sid_svc:
-                            set_last_catalog_service(sid, sid_svc)
-                        llm_q = q or f"Информация из {md_ref}"
-                        if price_line:
-                            llm_q = f"{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}"
-                            price_applied = True
-                        emit_bot_event(
-                            logger,
-                            "content_arbiter_price_injection",
-                            status="ok",
-                            details={
-                                "selected_route": "catalog_md_first",
-                                "price_line_applied": bool(price_applied),
-                                "md_entry_ref": md_ref,
-                                "matched_service_id": sid_svc,
-                            },
-                        )
-                        return _sse_chunk_response(
-                            ch,
-                            q,
-                            sid,
-                            client_id,
-                            llm_question=llm_q,
-                            log_event="Answer generated from md_entry_ref",
-                            route="catalog_md_first",
-                        )
-
-            if sel.selected_route == "catalog_facts":
-                cat = cands.catalog
-                svc = cat.get("service") or {}
-                sid_svc = str(cat.get("matched_service_id") or "")
-                payload = build_service_facts_card_payload(
-                    sid=sid,
-                    client_id=client_id,
-                    service_id=sid_svc,
-                    service=svc,
-                    match_score=float(cat.get("match_score") or 0.0),
-                    user_question=q,
-                )
-                price_line = _service_price_line_for_content(svc, client_id)
-                price_applied = False
-                if price_line:
-                    base = (payload.get("answer") or "").strip()
-                    payload["answer"] = f"{base}\n\n{price_line}" if base else price_line
-                    payload.setdefault("meta", {})["price_display_applied"] = "always"
-                    price_applied = True
-                log_json(
-                    logger,
-                    "catalog_route",
-                    route="facts",
-                    matched_service_id=sid_svc,
-                    match_score=cat.get("match_score"),
-                )
-                if sid_svc:
-                    set_last_catalog_service(sid, sid_svc)
-                emit_bot_event(
-                    logger,
-                    "content_arbiter_price_injection",
-                    status="ok",
-                    details={
-                        "selected_route": "catalog_facts",
-                        "price_line_applied": bool(price_applied),
-                        "matched_service_id": sid_svc,
-                    },
-                )
-                return _sse_service_reply(payload, sid, q, doc_id=None, route="catalog_facts")
-
-            if sel.selected_route == "guided":
-                guided = _service_payload(
-                    "Понял. Могу коротко подсказать и помочь выбрать направление — что для вас важнее?",
-                    sid,
-                    client_id,
-                    quick_replies=[
-                        {"label": "Стоимость", "ref": "implantation__pricing__implants.md#korotko"},
-                        {"label": "Больно ли", "ref": "implantation__faq__pain.md#korotko"},
-                        {"label": "Сроки", "ref": "implantation__faq__duration.md#korotko"},
-                        {"label": "Подходит ли мне", "ref": "implantation__info__contraindications.md#korotko"},
-                        {"label": "Записаться", "ref": "clinic__info__consultation.md#korotko"},
-                    ],
-                    cta={"text": "Записаться", "action": "lead"},
-                )
-                return _sse_service_reply(guided, sid, q, doc_id=None, route="guided")
-
-            if sel.selected_route == "retrieval_chunk" and isinstance(sel.selected_chunk, dict):
-                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
-                _log_selection(
-                    q=q,
-                    chosen_chunk=sel.selected_chunk,
-                    chosen_score=sel.selected_chunk.get("_score"),
-                    original_top_score=dmeta.get("top_score"),
-                    rerank_applied=bool((cands.retrieval or {}).get("rerank_applied")),
-                )
-                return _sse_chunk_response(
-                    sel.selected_chunk,
-                    q,
-                    sid,
-                    client_id,
-                    route="retrieval_chunk",
-                )
-
-            rmode = str((cands.retrieval or {}).get("mode") or "")
-            if rmode == "no_candidates":
-                emit_bot_event(
-                    logger,
-                    "retrieval_fallback",
-                    status="no_candidates",
-                    details={
-                        "reason": "no_candidates",
-                        "question_preview": (q or "")[:200],
-                        "top_score": ((cands.retrieval or {}).get("debug_meta") or {}).get("top_score"),
-                    },
-                )
-                return _sse_service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
-            if rmode == "low_score":
-                dmeta = (cands.retrieval.get("debug_meta") or {}) if isinstance(cands.retrieval, dict) else {}
-                emit_bot_event(
-                    logger,
-                    "retrieval_fallback",
-                    status="low_score",
-                    details={
-                        "reason": "low_score",
-                        "question_preview": (q or "")[:200],
-                        "top_score": dmeta.get("top_score"),
-                        "threshold": dmeta.get("threshold"),
-                        "alias_score": dmeta.get("alias_score"),
-                        "top_candidate": dmeta.get("top_candidate"),
-                        "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
-                    },
-                )
-                st_ls = mem_get(sid)
-                pls = low_score_response(sid, client_id)
-                pls = _apply_response_policy_compat(
-                    pls,
-                    st_ls,
-                    q,
-                    topic_state={},
-                    doc_meta={},
-                    pre_doc_turn_count=None,
-                    session_id=sid,
-                    client_id=client_id,
-                )
-                return _sse_service_reply(pls, sid, q, route="low_score_fallback")
-
-            return _sse_service_reply(no_candidates_response(), sid, q, route="error")
-
-        log_json(logger, "Processing question", question=q[:100], question_length=len(q))
-        selection = select_chunk_for_question(q, client_id=client_id, sid=sid)
-        mode = selection.get("mode")
-        dmeta = selection.get("debug_meta") or {}
-        if mode == "no_candidates":
-            log_json(logger, "No candidates found", question=q[:50])
-            emit_bot_event(
-                logger,
-                "retrieval_fallback",
-                status="no_candidates",
-                details={
-                    "reason": "no_candidates",
-                    "question_preview": (q or "")[:200],
-                    "top_score": dmeta.get("top_score"),
-                },
-            )
-            return _sse_service_reply(no_candidates_response(), sid, q, route="retrieval_no_candidates")
-        if mode == "low_score":
-            log_json(logger, "low_score_fallback", **dmeta)
-            emit_bot_event(
-                logger,
-                "retrieval_fallback",
-                status="low_score",
-                details={
-                    "reason": "low_score",
-                    "question_preview": (q or "")[:200],
-                    "top_score": dmeta.get("top_score"),
-                    "threshold": dmeta.get("threshold"),
-                    "alias_score": dmeta.get("alias_score"),
-                    "top_candidate": dmeta.get("top_candidate"),
-                    "query_user_raw": (dmeta.get("query_user_raw") or "")[:200],
-                },
-            )
-            st_ls = mem_get(sid)
-            pls = low_score_response(sid, client_id)
-            pls = _apply_response_policy_compat(
-                pls, st_ls, q,
-                topic_state={}, doc_meta={},
-                pre_doc_turn_count=None,
-                session_id=sid, client_id=client_id,
-            )
-            return _sse_service_reply(pls, sid, q, route="low_score_fallback")
-        if mode == "chunk":
-            final_chunk = selection.get("chunk")
-            if not isinstance(final_chunk, dict):
-                log_json(logger, "selection_invalid_chunk", debug_meta=dmeta)
-                emit_bot_event(
-                    logger,
-                    "retrieval_fallback",
-                    status="invalid_chunk",
-                    details={
-                        "reason": "selection_invalid_chunk",
-                        "question_preview": (q or "")[:200],
-                        "debug_meta": dmeta,
-                    },
-                )
-                return _sse_service_reply(no_candidates_response(), sid, q, route="error")
-            if dmeta.get("selected_by") == "alias":
-                log_json(
-                    logger, "alias_hit_selected",
-                    alias_score=dmeta.get("alias_score"),
-                    file=final_chunk.get("file"),
-                    h2_id=final_chunk.get("h2_id"),
-                    h3_id=final_chunk.get("h3_id"),
-                )
-            _log_selection(
-                q=q,
-                chosen_chunk=final_chunk,
-                chosen_score=final_chunk.get("_score"),
-                original_top_score=dmeta.get("top_score"),
-                rerank_applied=bool(selection.get("rerank_applied")),
-            )
-            return _sse_chunk_response(final_chunk, q, sid, client_id, route="retrieval_chunk")
-        log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
-        emit_bot_event(
-            logger,
-            "retrieval_fallback",
-            status="unknown_mode",
-            details={
-                "reason": "selection_unknown_mode",
-                "mode": mode,
-                "question_preview": (q or "")[:200],
-                "debug_meta": dmeta,
-            },
-        )
-        return _sse_service_reply(no_candidates_response(), sid, q, route="error")
-
+        orch_r = _orchestrate_ask_turn(data)
+        q = orch_r.q or ""
+        return _dispatch_orchestration_sse(orch_r)
     except Exception as e:
         logger.exception("ask_stream_failed", extra={"q": q, "err": str(e)})
         if request.ctx.get("sid") and (q or "").strip():
@@ -2149,6 +1372,10 @@ def ask_stream():
                     "answer_chars": 0,
                     "latency_ms": None,
                     "fallback_reason": "ask_stream_failed",
+                    "retrieval_scope_topic": None,
+                    "retrieval_scope_widen_fallback": False,
+                    "legacy_intent": None,
+                    "effective_intent": "",
                 },
             )
         emit_bot_event(
@@ -2158,7 +1385,6 @@ def ask_stream():
             details={"error": str(e)[:500], "question_preview": (q or "")[:200]},
         )
         return safe_jsonify(internal_error_response()), 200
-
 
 @app.get("/__debug/retrieval")
 def dbg():
@@ -2225,3 +1451,4 @@ def create_lead():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, debug=False)
+

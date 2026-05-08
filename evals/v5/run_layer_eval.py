@@ -57,7 +57,10 @@ def _norm_expected(v: Any) -> str | None:
 def eval_resolver() -> EvalResult:
     cases = _load_json(_here("resolver_golden.json"))
     try:
-        from resolver import resolve_decision_frame_shadow
+        # PR #1.2.6: same LLM path + RESOLVER_SYSTEM_PROMPT as /ask (not shadow-only copy).
+        from resolver import RESOLVER_SYSTEM_PROMPT, resolve_decision_frame
+
+        assert "Пример формата" in RESOLVER_SYSTEM_PROMPT and "route_intent" in RESOLVER_SYSTEM_PROMPT
     except Exception as e:
         return EvalResult(
             layer="resolver",
@@ -77,7 +80,7 @@ def eval_resolver() -> EvalResult:
             continue
         total += 1
         try:
-            df = resolve_decision_frame_shadow(question=q, history=[])
+            df = resolve_decision_frame(question=q, history=[])
         except Exception as e:
             bad.append({"id": cid, "error": f"call_failed: {str(e)[:200]}"})
             continue

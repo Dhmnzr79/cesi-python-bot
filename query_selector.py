@@ -2,6 +2,7 @@
 import json
 import os
 import re
+from typing import Any
 
 from config import (
     ALIAS_SOFT_THRESHOLD,
@@ -31,7 +32,11 @@ from retriever import (
 
 
 def select_chunk_for_question(
-    q: str, *, client_id: str | None, sid: str | None = None
+    q: str,
+    *,
+    client_id: str | None,
+    sid: str | None = None,
+    scope_topic: str | None = None,
 ) -> dict:
     """Return selection result for /ask.
 
@@ -60,15 +65,30 @@ def select_chunk_for_question(
         "rewrite_applied": bool(q_rewrite_eff.strip().lower() != q_user.strip().lower()),
     }
 
-    def _dm(extra: dict) -> dict:
-        return {**base_meta, **extra}
-
-    primary = retrieve(q_user, topk=8, client_id=client_id)
+    tel_p: dict[str, Any] = {}
+    tel_s: dict[str, Any] = {}
+    primary = retrieve(
+        q_user,
+        topk=8,
+        client_id=client_id,
+        scope_topic=scope_topic,
+        telemetry=tel_p,
+    )
     secondary: list = []
     if nr != nu:
         secondary = retrieve(
-            q_rewrite_eff, topk=8, client_id=client_id, silent=True
+            q_rewrite_eff,
+            topk=8,
+            client_id=client_id,
+            silent=True,
+            scope_topic=scope_topic,
+            telemetry=tel_s,
         )
+    widen_fb = bool(tel_p.get("scope_widen_fallback")) or bool(tel_s.get("scope_widen_fallback"))
+
+    def _dm(extra: dict) -> dict:
+        return {**base_meta, **extra, "scope_widen_fallback": widen_fb}
+
     cands = merge_retrieval_candidates(primary, secondary)[:8]
     cands = prefer_overview_if_broad(cands, broad_query_detect(q_policy))
     if not cands:

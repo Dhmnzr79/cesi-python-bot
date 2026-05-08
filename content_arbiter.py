@@ -175,11 +175,15 @@ class ContentRouteResult:
     rejected_candidates: list[dict]
 
 
-def collect_content_candidates(*, q: str, sid: str, client_id: str | None) -> ContentCandidates:
+def collect_content_candidates(
+    *, q: str, sid: str, client_id: str | None, scope_topic: str | None = None
+) -> ContentCandidates:
     q_user = (q or "").strip()
     q_norm = normalize_retrieval_query(q_user) or q_user
 
-    selection = select_chunk_for_question(q_user, client_id=client_id, sid=sid)
+    selection = select_chunk_for_question(
+        q_user, client_id=client_id, sid=sid, scope_topic=scope_topic
+    )
     retrieval_mode = str(selection.get("mode") or "")
     retrieval_chunk = selection.get("chunk") if retrieval_mode == "chunk" else None
     retrieval_kind = _classify_chunk_kind(retrieval_chunk) if isinstance(retrieval_chunk, dict) else None

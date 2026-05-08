@@ -41,7 +41,9 @@ def _pretty(obj: Any) -> str:
 
 
 def main() -> int:
-    from resolver import resolve_decision_frame_shadow
+    from resolver import RESOLVER_SYSTEM_PROMPT, resolve_decision_frame
+
+    assert "Пример формата" in RESOLVER_SYSTEM_PROMPT and "route_intent" in RESOLVER_SYSTEM_PROMPT
 
     cases = _load_cases(_here("resolver_golden.json"))
     field_fail_counts: Counter[str] = Counter()
@@ -58,7 +60,7 @@ def main() -> int:
             continue
 
         total += 1
-        actual_df = resolve_decision_frame_shadow(question=q, history=[])
+        actual_df = resolve_decision_frame(question=q, history=[])
         actual = actual_df.model_dump()
 
         diff_fields: list[str] = []

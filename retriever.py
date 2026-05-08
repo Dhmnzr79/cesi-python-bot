@@ -46,7 +46,7 @@ _EMB: np.ndarray | None = None
 _EMB_LOAD_ERROR: str | None = None
 _ALIAS_INDEX: dict[str, list[dict]] | None = None
 _RETRIEVE_CACHE_LOCK = threading.RLock()
-_RETRIEVE_CACHE: dict[tuple[str, int, str], tuple[float, list[dict]]] = {}
+_RETRIEVE_CACHE: dict[tuple[str, int, str, str], tuple[float, list[dict]]] = {}
 
 
 def load_corpus_if_needed() -> list:
@@ -809,9 +809,100 @@ def merge_retrieval_candidates(*lists: list) -> list:
     return sorted(best.values(), key=lambda x: float(x.get("_score") or 0.0), reverse=True)
 
 
+def _active_scope_topic(scope_topic: str | None) -> str | None:
+    """Return normalized topic slug for retrieval scope, or None for full corpus."""
+    if scope_topic is None:
+        return None
+    st = str(scope_topic).strip().lower()
+    if not st or st == "unknown":
+        return None
+    return st
+
+
+def _corpus_indices_for_scope_topic(
+    corpus: list, *, scope_slug: str, client_id: str | None
+) -> list[int]:
+    """Row indices matching frontmatter-derived chunk topic; excludes chunks without topic."""
+    out_idx: list[int] = []
+    want = scope_slug.strip().lower()
+    for i, c in enumerate(corpus):
+        if not isinstance(c, dict):
+            continue
+        if client_id and c.get("client_id") != client_id:
+            continue
+        ct = c.get("topic")
+        if ct is None or str(ct).strip() == "":
+            continue
+        if str(ct).strip().lower() != want:
+            continue
+        out_idx.append(int(i))
+    return out_idx
+
+
+def _gather_retrieval_candidates(
+    *,
+    emb: np.ndarray,
+    corpus: list,
+    v: np.ndarray,
+    topk: int,
+    client_id: str | None,
+    scoped_indices: list[int] | None,
+) -> list[dict]:
+    """Cosine-ranked chunks; scoped_indices=None searches full corpus."""
+    out: list[dict] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+
+    if scoped_indices:
+        ix = np.array(scoped_indices, dtype=np.intp)
+        sub = emb[ix]
+        sims_local = sub @ v
+        ord_local = np.argsort(-sims_local)[: max(topk, 8)]
+        for li in ord_local:
+            global_i = int(ix[int(li)])
+            c = corpus[global_i]
+            if client_id and c.get("client_id") != client_id:
+                continue
+            key = (c["file"], c.get("h2_id") or c.get("h2"), c.get("h3_id") or c.get("h3"))
+            if key in seen:
+                continue
+            seen.add(key)
+            c2 = dict(c)
+            c2["_score"] = float(sims_local[int(li)])
+            out.append(c2)
+            if len(out) == topk:
+                break
+        return out
+
+    sims = emb @ v
+    idx = np.argsort(-sims)[: max(topk, 8)]
+    for i in idx:
+        c = corpus[int(i)]
+        if client_id and c.get("client_id") != client_id:
+            continue
+        key = (c["file"], c.get("h2_id") or c.get("h2"), c.get("h3_id") or c.get("h3"))
+        if key in seen:
+            continue
+        seen.add(key)
+        c2 = dict(c)
+        c2["_score"] = float(sims[int(i)])
+        out.append(c2)
+        if len(out) == topk:
+            break
+    return out
+
+
 def retrieve(
-    q: str, topk: int = 4, *, client_id: str | None = None, silent: bool = False
+    q: str,
+    topk: int = 4,
+    *,
+    client_id: str | None = None,
+    silent: bool = False,
+    scope_topic: str | None = None,
+    telemetry: dict[str, Any] | None = None,
 ) -> list:
+    if telemetry is not None:
+        telemetry.setdefault("scope_widen_fallback", False)
+
     emb = _get_embeddings()
     q_in = (q or "").strip()
     q_norm = normalize_retrieval_query(q_in)
@@ -833,12 +924,21 @@ def retrieve(
             emb_path=EMB_PATH,
         )
         return []
-    cache_key = (q_embed, int(topk), str(client_id or ""))
+
+    scope_key = ""
+    applied_scope = _active_scope_topic(scope_topic)
+    if applied_scope:
+        scope_key = applied_scope
+
+    cache_key = (q_embed, int(topk), scope_key, str(client_id or ""))
     now = time.time()
     with _RETRIEVE_CACHE_LOCK:
         cached = _RETRIEVE_CACHE.get(cache_key)
         if cached and (now - float(cached[0]) <= RETRIEVE_CACHE_TTL_SEC):
             out_cached = [dict(item) for item in (cached[1] or [])]
+            if telemetry is not None:
+                # Cached paths are stored only without widen fallback (see below).
+                telemetry["scope_widen_fallback"] = bool(telemetry.get("scope_widen_fallback"))
             if not silent:
                 log_json(
                     logger,
@@ -848,27 +948,62 @@ def retrieve(
                     query_normalized=(q_norm[:500] if q_norm else None),
                     k=topk,
                     client_id=client_id,
+                    scope_topic=scope_key or None,
                     size=len(out_cached),
                 )
             return out_cached
-    v = embed_q(q_embed)
-    sims = emb @ v
-    idx = np.argsort(-sims)[: max(topk, 8)]
-    seen, out = set(), []
+
     corpus = load_corpus_if_needed()
-    for i in idx:
-        c = corpus[int(i)]
-        if client_id and c.get("client_id") != client_id:
-            continue
-        key = (c["file"], c.get("h2_id") or c.get("h2"), c.get("h3_id") or c.get("h3"))
-        if key in seen:
-            continue
-        seen.add(key)
-        c2 = dict(c)
-        c2["_score"] = float(sims[int(i)])
-        out.append(c2)
-        if len(out) == topk:
-            break
+    v = embed_q(q_embed)
+    widen_used = False
+    prior_scope: str | None = str(scope_topic).strip() if scope_topic else None
+
+    scoped_indices: list[int] | None = None
+    if applied_scope:
+        scoped_indices = _corpus_indices_for_scope_topic(
+            corpus, scope_slug=applied_scope, client_id=client_id
+        )
+        if not scoped_indices:
+            widen_used = True
+            if telemetry is not None:
+                telemetry["scope_widen_fallback"] = True
+            log_json(
+                logger,
+                "retrieval_scope_widen_fallback",
+                used_query=q_embed[:500],
+                query_raw=q_in[:200],
+                details={"prior_scope_topic": prior_scope},
+            )
+            scoped_indices = None
+
+    out = _gather_retrieval_candidates(
+        emb=emb,
+        corpus=corpus,
+        v=v,
+        topk=int(topk),
+        client_id=client_id,
+        scoped_indices=scoped_indices,
+    )
+
+    if applied_scope and not widen_used and len(out) == 0:
+        widen_used = True
+        if telemetry is not None:
+            telemetry["scope_widen_fallback"] = True
+        log_json(
+            logger,
+            "retrieval_scope_widen_fallback",
+            used_query=q_embed[:500],
+            query_raw=q_in[:200],
+            details={"prior_scope_topic": prior_scope},
+        )
+        out = _gather_retrieval_candidates(
+            emb=emb,
+            corpus=corpus,
+            v=v,
+            topk=int(topk),
+            client_id=client_id,
+            scoped_indices=None,
+        )
 
     try:
         chunks_used = [chunk_info(item, item.get("_score")) for item in out[:topk]]
@@ -883,12 +1018,17 @@ def retrieve(
             query_raw=q_in[:500],
             query_normalized=(q_norm[:500] if q_norm else None),
             k=topk,
+            scope_topic=(scope_key or None),
+            scope_widen_fallback=bool(widen_used),
             dedup_keys=["file", "h2_id", "h3_id"],
             chunks_used=chunks_used,
             top_score=(chunks_used[0]["score"] if chunks_used else None),
         )
     with _RETRIEVE_CACHE_LOCK:
-        _RETRIEVE_CACHE[cache_key] = (now, [dict(item) for item in out])
+        # Avoid caching widen results: keyed query+scope must not replay full-corpus mixes.
+        if not widen_used:
+            _RETRIEVE_CACHE[cache_key] = (now, [dict(item) for item in out])
+
         if len(_RETRIEVE_CACHE) > max(32, int(RETRIEVE_CACHE_MAXSIZE)):
             stale_keys = sorted(_RETRIEVE_CACHE.items(), key=lambda kv: kv[1][0])
             drop_n = len(_RETRIEVE_CACHE) - int(RETRIEVE_CACHE_MAXSIZE)

@@ -26,6 +26,7 @@ class SessionState(BaseModel):
     client_id: str = Field(..., min_length=1)
     history: list[SessionMessage]
     current_doc_id: str | None = None
+    # На рантайме сейчас хранится как `last_catalog_service_id` в `session.mem`.
     last_service_id: str | None = None
     covered_h3: list[str]
     topic_turn_count: int = Field(..., ge=0)
