@@ -68,11 +68,12 @@ def build_policy_decision(
     pre_doc_turn_count: int | None = None,
     session_id: str | None = None,
     client_id: str | None = None,
+    booking: bool | None = None,
 ) -> dict:
     meta = payload.get("meta") or {}
     low_score = bool(meta.get("low_score"))
     lead_flow_active = is_active_lead_flow(session_state)
-    booking = booking_intent(q, sid=session_id, client_id=client_id)
+    booking = bool(booking) if booking is not None else booking_intent(q, sid=session_id, client_id=client_id)
     exhausted = _is_topic_exhausted(doc_meta, topic_state)
     doc_turn_after = int(topic_state.get("doc_turn_count") or 0)
     doc_turn_before = (
@@ -230,6 +231,7 @@ def apply_response_policy(
     pre_doc_turn_count: int | None = None,
     session_id: str | None = None,
     client_id: str | None = None,
+    booking: bool | None = None,
 ) -> dict:
     topic_state = topic_state or {}
     doc_meta = doc_meta or {}
@@ -242,6 +244,7 @@ def apply_response_policy(
         pre_doc_turn_count=pre_doc_turn_count,
         session_id=session_id,
         client_id=client_id,
+        booking=booking,
     )
 
     payload["quick_replies"] = decision["refs"] if decision["show_refs"] else []

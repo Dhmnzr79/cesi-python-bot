@@ -50,6 +50,24 @@
       }
     ]
   },
+  "implantation": {
+  "title": "Имплантация зубов",
+  "aliases": [
+    "имплантация",
+    "имплантация зубов",
+    "поставить имплант",
+    "установка импланта"
+  ],
+  "active": true,
+  "response_mode": null,
+  "facts": [],
+  "md_entry_ref": "implantation__info__methods_overview",
+  "price_key": null,
+  "price_ref": "implantation__pricing__implants.md#korotko",
+  "concern_ref": "implantation__faq__cost.md#korotko",
+  "price_display": "on_request",
+  "suggest_refs": []
+},
   "all_on_6": {
     "title": "Имплантация All-on-6",
     "aliases": [
@@ -91,8 +109,6 @@
   "classic": {
     "title": "Классическая имплантация",
     "aliases": [
-      "имплант",
-      "имплантация",
       "классическая имплантация",
       "поставить имплант",
       "вставить зуб",
@@ -131,8 +147,8 @@
     "aliases": [
       "временные зубы",
       "временная коронка",
-      "временный зуб на имплант",
-      "временные зубы на имплантах"
+      "временные зубы на имплантах",
+      "зачем нужна временная коронка"
     ],
     "active": true,
     "response_mode": null,
@@ -158,7 +174,7 @@
     "response_mode": null,
     "facts": [],
     "md_entry_ref": "orthodontics__service__aligners",
-    "price_key": "aligners",
+    "price_key": null,
     "price_ref": null,
     "price_display": "on_request",
     "suggest_refs": []
@@ -176,7 +192,7 @@
     "response_mode": null,
     "facts": [],
     "md_entry_ref": "prosthetics__service__veneers",
-    "price_key": "veneers",
+    "price_key": null,
     "price_ref": null,
     "price_display": "on_request",
     "suggest_refs": []
@@ -187,6 +203,7 @@
       "коронки",
       "коронка на зуб",
       "циркониевая коронка",
+      "циркониевая коронка на имплант",
       "зубная коронка",
       "поставить коронку"
     ],

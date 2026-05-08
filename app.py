@@ -39,6 +39,7 @@ from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
 from policy import (
     apply_response_policy,
+    booking_intent,
     pick_contacts_chunk,
 )
 from retriever import (
@@ -143,6 +144,8 @@ def _apply_response_policy_compat(
         kw["session_id"] = session_id
     if "client_id" in _APPLY_POLICY_PARAMS:
         kw["client_id"] = client_id
+    if "booking" in _APPLY_POLICY_PARAMS:
+        kw["booking"] = request.ctx.get("booking_intent")
     return apply_response_policy(**kw)
 
 
@@ -564,6 +567,7 @@ def finalize_ask(
     effective_route = str(route or request.ctx.get("route") or _infer_route(payload))
     request.ctx["route"] = effective_route
     pmeta = payload.get("meta") or {}
+    meta["route"] = effective_route
     answer_text = str(payload.get("answer") or "")
     user_text_redacted = redact_text((q or ""), max_len=8000)
     user_preview_redacted = redact_text((q or ""), max_len=200)
@@ -888,6 +892,11 @@ def ask():
 
         st = mem_get(sid)
 
+        # booking_intent is used both for early lead-flow gating (handle_flows)
+        # and for UI policy (CTA/refs). Compute once to avoid duplicate LLM calls.
+        if q:
+            request.ctx["booking_intent"] = bool(booking_intent(q, sid=sid, client_id=client_id))
+
         flow_result = handle_flows(
             data=data,
             st=st,
@@ -898,6 +907,7 @@ def ask():
             service_payload=_service_payload,
             get_last_content_ui_payload=_get_last_content_ui_payload_compat,
             get_topic_state=get_topic_state,
+            booking=request.ctx.get("booking_intent"),
         )
         if flow_result is not None:
             redirect_ref = (flow_result.get("redirect_ref") or "").strip()
@@ -915,6 +925,7 @@ def ask():
                         llm_question=q or f"Информация из {redirect_ref}",
                         log_event="Answer generated from flow redirect_ref",
                         route="flow_redirect_ref",
+                        booking=request.ctx.get("booking_intent"),
                     )
             return _service_reply(
                 flow_result["payload"],
@@ -965,6 +976,7 @@ def ask():
                     llm_question=q or f"Информация из {ref}",
                     log_event="Answer generated from ref",
                     route="retrieval_chunk",
+                    booking=request.ctx.get("booking_intent"),
                 )
 
         if not q:
@@ -988,6 +1000,7 @@ def ask():
                         llm_question=q,
                         log_event="Answer from short_contextual fallback",
                         route="retrieval_chunk",
+                        booking=request.ctx.get("booking_intent"),
                     )
 
         intent = classify_intent(q, client_id=client_id, sid=sid)
@@ -1010,6 +1023,7 @@ def ask():
                     llm_question=q,
                     log_event="Answer generated from contacts intent",
                     route="contacts_chunk",
+                    booking=request.ctx.get("booking_intent"),
                 )
 
         if intent in ("price_lookup", "price_concern"):
@@ -1020,14 +1034,62 @@ def ask():
                 intent_override=intent,
             )
             if price_route.get("mode") == "clarify":
-                payload = build_price_clarify_payload(
+                # price_lookup: ask to clarify which service.
+                if intent == "price_lookup":
+                    payload = build_price_clarify_payload(
+                        sid=sid,
+                        client_id=client_id,
+                        intent=str(price_route.get("intent") or "other"),
+                        fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                    )
+                    log_json(logger, "price_route", **(payload.get("meta") or {}))
+                    return _service_reply(payload, sid, q, route="price_lookup")
+
+                # price_concern: do NOT ask which service; fall back to canonical cost FAQ.
+                concern_ref = "implantation__faq__cost.md#korotko"
+                meta_overrides = {
+                    "intent": "price_concern",
+                    "route_source": "concern_fallback_doc",
+                    "concern_ref": concern_ref,
+                    "fallback_reason": "service_not_found",
+                    "matched_service_id": None,
+                }
+                log_json(
+                    logger,
+                    "price_route",
+                    intent="price_concern",
+                    matched_service_id=None,
+                    match_score=0.0,
+                    route_source="concern_fallback_doc",
+                    concern_ref=concern_ref,
+                    fallback_reason="service_not_found",
+                )
+                ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+                if ch:
+                    return respond_from_chunk(
+                        chunk=ch,
+                        q=q,
+                        sid=sid,
+                        client_id=client_id,
+                        finalize_ask=finalize_ask,
+                        safe_jsonify=safe_jsonify,
+                        logger=logger,
+                        llm_question=q,
+                        log_event="Answer generated from price_concern_fallback",
+                        route="price_concern_fallback",
+                        meta_overrides=meta_overrides,
+                        booking=request.ctx.get("booking_intent"),
+                    )
+                payload = build_price_concern_payload(
                     sid=sid,
                     client_id=client_id,
-                    intent=str(price_route.get("intent") or "other"),
-                    fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                    service_id="unknown",
+                    service={},
+                    match_score=0.0,
                 )
+                payload.setdefault("meta", {}).update(meta_overrides)
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _service_reply(payload, sid, q, route="price_lookup")
+                return _service_reply(payload, sid, q, route="price_concern_fallback")
             if price_route.get("mode") == "matched":
                 intent = str(price_route.get("intent") or "other")
                 service = price_route.get("service") or {}
@@ -1062,6 +1124,7 @@ def ask():
                                 llm_question=q,
                                 log_event="Answer generated from concern_ref",
                                 route="price_concern",
+                                booking=request.ctx.get("booking_intent"),
                             )
                     payload = build_price_concern_payload(
                         sid=sid,
@@ -1098,6 +1161,7 @@ def ask():
                             llm_question=q or f"Цена по {ref}",
                             log_event="Answer generated from price_ref",
                             route="price_lookup",
+                            booking=request.ctx.get("booking_intent"),
                         )
                 payload = build_price_lookup_payload(
                     sid=sid,
@@ -1388,6 +1452,7 @@ def ask():
                 safe_jsonify=safe_jsonify,
                 logger=logger,
                 route="retrieval_chunk",
+                booking=request.ctx.get("booking_intent"),
             )
         log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
         emit_bot_event(
@@ -1482,6 +1547,8 @@ def _sse_chunk_response(
     llm_question: str | None = None,
     log_event: str = "Answer generated",
     route: str = "retrieval_chunk",
+    meta_overrides: dict | None = None,
+    booking: bool | None = None,
 ):
     """Стриминговый ответ из чанка через SSE."""
     return app.response_class(
@@ -1496,6 +1563,8 @@ def _sse_chunk_response(
                 llm_question=llm_question,
                 log_event=log_event,
                 route=route,
+                meta_overrides=meta_overrides,
+                booking=booking,
             ),
         ),
         mimetype="text/event-stream",
@@ -1568,6 +1637,9 @@ def ask_stream():
 
         st = mem_get(sid)
 
+        if q:
+            request.ctx["booking_intent"] = bool(booking_intent(q, sid=sid, client_id=client_id))
+
         flow_result = handle_flows(
             data=data,
             st=st,
@@ -1578,6 +1650,7 @@ def ask_stream():
             service_payload=_service_payload,
             get_last_content_ui_payload=_get_last_content_ui_payload_compat,
             get_topic_state=get_topic_state,
+            booking=request.ctx.get("booking_intent"),
         )
         if flow_result is not None:
             redirect_ref = (flow_result.get("redirect_ref") or "").strip()
@@ -1589,6 +1662,7 @@ def ask_stream():
                         llm_question=q or f"Информация из {redirect_ref}",
                         log_event="Answer generated from flow redirect_ref",
                         route="flow_redirect_ref",
+                        booking=request.ctx.get("booking_intent"),
                     )
             return _sse_service_reply(
                 flow_result["payload"], sid, q, doc_id=flow_result.get("doc_id"), route="lead_flow"
@@ -1658,6 +1732,7 @@ def ask_stream():
                     picked, q, sid, client_id,
                     log_event="Answer generated from contacts intent",
                     route="contacts_chunk",
+                    booking=request.ctx.get("booking_intent"),
                 )
 
         if intent in ("price_lookup", "price_concern"):
@@ -1665,14 +1740,57 @@ def ask_stream():
                 q, client_id=client_id, sid=sid, intent_override=intent,
             )
             if price_route.get("mode") == "clarify":
-                payload = build_price_clarify_payload(
+                if intent == "price_lookup":
+                    payload = build_price_clarify_payload(
+                        sid=sid,
+                        client_id=client_id,
+                        intent=str(price_route.get("intent") or "other"),
+                        fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                    )
+                    log_json(logger, "price_route", **(payload.get("meta") or {}))
+                    return _sse_service_reply(payload, sid, q, route="price_lookup")
+
+                concern_ref = "implantation__faq__cost.md#korotko"
+                meta_overrides = {
+                    "intent": "price_concern",
+                    "route_source": "concern_fallback_doc",
+                    "concern_ref": concern_ref,
+                    "fallback_reason": "service_not_found",
+                    "matched_service_id": None,
+                }
+                log_json(
+                    logger,
+                    "price_route",
+                    intent="price_concern",
+                    matched_service_id=None,
+                    match_score=0.0,
+                    route_source="concern_fallback_doc",
+                    concern_ref=concern_ref,
+                    fallback_reason="service_not_found",
+                )
+                ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+                if ch:
+                    return _sse_chunk_response(
+                        ch,
+                        q,
+                        sid,
+                        client_id,
+                        llm_question=q,
+                        log_event="Answer generated from price_concern_fallback",
+                        route="price_concern_fallback",
+                        meta_overrides=meta_overrides,
+                        booking=request.ctx.get("booking_intent"),
+                    )
+                payload = build_price_concern_payload(
                     sid=sid,
                     client_id=client_id,
-                    intent=str(price_route.get("intent") or "other"),
-                    fallback_reason=str(price_route.get("fallback_reason") or "service_not_found"),
+                    service_id="unknown",
+                    service={},
+                    match_score=0.0,
                 )
+                payload.setdefault("meta", {}).update(meta_overrides)
                 log_json(logger, "price_route", **(payload.get("meta") or {}))
-                return _sse_service_reply(payload, sid, q, route="price_lookup")
+                return _sse_service_reply(payload, sid, q, route="price_concern_fallback")
             if price_route.get("mode") == "matched":
                 intent = str(price_route.get("intent") or "other")
                 service = price_route.get("service") or {}
@@ -1699,6 +1817,7 @@ def ask_stream():
                                 ch, q, sid, client_id,
                                 log_event="Answer generated from concern_ref",
                                 route="price_concern",
+                                booking=request.ctx.get("booking_intent"),
                             )
                     payload = build_price_concern_payload(
                         sid=sid, client_id=client_id,
@@ -1725,6 +1844,7 @@ def ask_stream():
                             llm_question=q or f"Цена по {ref}",
                             log_event="Answer generated from price_ref",
                             route="price_lookup",
+                            booking=request.ctx.get("booking_intent"),
                         )
                 payload = build_price_lookup_payload(
                     sid=sid, client_id=client_id,
@@ -1990,7 +2110,14 @@ def ask_stream():
                 original_top_score=dmeta.get("top_score"),
                 rerank_applied=bool(selection.get("rerank_applied")),
             )
-            return _sse_chunk_response(final_chunk, q, sid, client_id, route="retrieval_chunk")
+            return _sse_chunk_response(
+                final_chunk,
+                q,
+                sid,
+                client_id,
+                route="retrieval_chunk",
+                booking=request.ctx.get("booking_intent"),
+            )
         log_json(logger, "selection_unknown_mode", mode=mode, debug_meta=dmeta)
         emit_bot_event(
             logger,

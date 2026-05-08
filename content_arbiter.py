@@ -78,6 +78,13 @@ def _classify_doc_kind(doc_id: str | None) -> str | None:
     return None
 
 
+def _topic_prefix(doc_id: str | None) -> str | None:
+    """`implantation__faq__cost` -> `implantation`."""
+    if not doc_id:
+        return None
+    return doc_id.split("__", 1)[0].strip().lower() or None
+
+
 def _classify_chunk_kind(chunk: dict) -> str | None:
     if not isinstance(chunk, dict):
         return None
@@ -284,6 +291,8 @@ def select_content_route(
     cat_mode = str(cat.get("mode") or "none")
     cat_doc_id = cat.get("doc_id")
     cat_is_overview = bool(cat.get("is_overview"))
+    ret_topic = _topic_prefix(ret_doc_id)
+    cat_topic = _topic_prefix(cat_doc_id)
     alias_spec = str((alias or {}).get("specificity") or "")
     token_count = int(candidates.debug_meta.get("token_count") or _token_count(q_user))
     has_modifier = bool(candidates.debug_meta.get("has_specific_modifier"))
@@ -293,6 +302,10 @@ def select_content_route(
         alias_score_f = float(alias_score) if alias_score is not None else 0.0
     except Exception:
         alias_score_f = 0.0
+    try:
+        ret_top_score_f = float((ret.get("debug_meta") or {}).get("top_score") or 0.0)
+    except Exception:
+        ret_top_score_f = 0.0
 
     # --- Rule 4: Weak all -> guided UX (do not auto-fall into catalog)
     if ret_mode in {"no_candidates", "low_score"} and cat_mode == "none":
@@ -388,12 +401,71 @@ def select_content_route(
             rejected_candidates=rejected,
         )
 
-    # --- Rule 1: FAQ/specific retrieval wins over broad service overview catalog
+    # --- Confident catalog beats mid-score retrieval when query is non-specific.
+    # Catches: "а вы делаете X?", "хочу X" — availability/overview questions that tend to
+    # drift into a random FAQ chunk inside the same topic.
+    if (
+        cat_mode == "md_first"
+        and cat_is_overview
+        and float(cat.get("match_score") or 0.0) >= 0.85
+        and ret_mode == "chunk"
+        and ret_top_score_f < 0.70
+        and (not has_modifier)
+    ):
+        rejected.append({"kind": "retrieval", "reason": "non_specific_query_catalog_wins"})
+        return ContentRouteResult(
+            kind="chunk",
+            selected_route="catalog_md_first",
+            selected_doc_id=cat_doc_id,
+            selected_chunk=None,
+            reason="confident_catalog_over_mid_retrieval",
+            debug_meta={**candidates.debug_meta, "rule": "confident_catalog_over_mid_retrieval"},
+            candidates={
+                "retrieval_candidate": ret,
+                "catalog_candidate": cat,
+                "alias_candidate": alias,
+                "session_context_candidate": candidates.session,
+            },
+            rejected_candidates=rejected,
+        )
+
+    # --- Cross-topic guard: confident catalog beats sideways retrieval sections.
+    if (
+        cat_mode == "md_first"
+        and cat_is_overview
+        and cat_topic is not None
+        and ret_mode == "chunk"
+        and ret_kind in {"service_section"}
+        and ret_topic is not None
+        and cat_topic != ret_topic
+        and float(cat.get("match_score") or 0.0) >= 0.82
+    ):
+        rejected.append({"kind": "retrieval", "reason": "cross_topic_retrieval_drop"})
+        return ContentRouteResult(
+            kind="chunk",
+            selected_route="catalog_md_first",
+            selected_doc_id=cat_doc_id,
+            selected_chunk=None,
+            reason="cross_topic_catalog_wins",
+            debug_meta={**candidates.debug_meta, "rule": "cross_topic_catalog_wins"},
+            candidates={
+                "retrieval_candidate": ret,
+                "catalog_candidate": cat,
+                "alias_candidate": alias,
+                "session_context_candidate": candidates.session,
+            },
+            rejected_candidates=rejected,
+        )
+
+    # --- Rule 1: FAQ/specific retrieval wins over broad service overview catalog (same topic only)
     if (
         ret_mode == "chunk"
         and ret_kind in {"faq_specific", "info_specific", "pricing_specific", "doctor_specific", "service_section"}
         and cat_mode == "md_first"
         and cat_is_overview
+        and ret_topic is not None
+        and cat_topic is not None
+        and ret_topic == cat_topic
     ):
         rejected.append({"kind": "catalog", "reason": "retrieval_specific_over_catalog_overview"})
         return ContentRouteResult(

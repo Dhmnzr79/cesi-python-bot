@@ -35,9 +35,12 @@
 ### `app.py`
 HTTP-граница, валидация `client_id`, маршрутизация по intent, финализация ответа.
 
+### `content_arbiter.py`
+Детерминированный арбитр для `intent=content`: собирает кандидатов (retrieval/catalog/alias/session) и выбирает маршрут без новых LLM-вызовов. Пишет подробную телеметрию выбора в `bot_event.content_arbiter_selected` (selected_route/reason/rule + candidates).
+
 ### `llm.py`
 - `classify_intent(q)` — LLM-классификатор намерения: `contacts / price_lookup / price_concern / content`. Fallback → `content`.
-- `rewrite_query_for_retrieval()` — переформулировка вопроса для семантического поиска (анафора, контекст диалога). Модель: `gpt-5.4-nano`, без temperature.
+- `rewrite_query_for_retrieval()` — переформулировка вопроса для семантического поиска (анафора, контекст диалога). Модель: `gpt-5.4-nano`, без temperature. Важное правило: rewrite не должен добавлять сущности/термины, которых не было в диалоге/вопросе (иначе растут «боковые» retrieval-hits).
 - `generate_answer_with_empathy()` — генерация ответа из чанка с учётом эмпатии. Модель: `gpt-5.4-mini`.
 - `classify_booking_wants_appointment()` — бинарный классификатор намерения записаться. Модель: `BOOKING_INTENT_LLM_MODEL` (по умолчанию `gpt-5.4-nano`).
 
@@ -55,7 +58,7 @@ HTTP-граница, валидация `client_id`, маршрутизация 
 Детерминированное управление UI-элементами: followups, refs, video, situation, CTA. Порог CTA через `cta_from_turn` в frontmatter.
 
 ### `flow_handlers.py`
-Сценарные ветки: lead, situation, back, yes. Booking-intent перехватывается здесь — до `classify_intent`.
+Сценарные ветки: lead, situation, back, yes. Booking-intent перехватывается здесь — до `classify_intent`. В текущей реализации booking считается один раз в начале turn (в `app.py`) и переиспользуется в flow + policy, чтобы избежать двойного LLM-вызова.
 
 ### `chunk_responder.py`
 Контентный пайплайн: chunk → LLM answer → policy → session side-effects → JSON.
@@ -123,11 +126,23 @@ price_concern → select_price_service_route(intent_override=intent)
                ├── price_concern + concern_ref → get_chunk_by_ref → respond_from_chunk
                ├── price_concern без concern_ref → build_price_concern_payload
                ├── price_lookup + prices_json → build_price_lookup_payload
-               └── no match → build_price_clarify_payload
+               └── no match → clarify (см. ниже)
 
-content     → select_catalog_content_route
-             ├── facts (md_entry_ref=null) → build_service_facts_card_payload
-             └── no match → select_chunk_for_question (retrieval)
+price_concern + service_not_found:
+  - не спрашиваем «какую услугу?» (это ломает UX возражения по цене)
+  - отдаём canonical fallback: `implantation__faq__cost.md#korotko`
+  - route: `price_concern_fallback`, meta: `route_source=concern_fallback_doc`, `fallback_reason=service_not_found`
+
+price_lookup + service_not_found:
+  - спрашиваем уточнение услуги (price_clarify)
+
+content     → `content_arbiter.py`:
+             collect_content_candidates(q, sid, client_id)
+             → select_content_route(q, sid, client_id, candidates)
+             ├── catalog_md_first (overview) → get_chunk_by_ref(md_entry_ref#anchor) → respond_from_chunk
+             ├── catalog_facts (card) → build_service_facts_card_payload
+             ├── retrieval_chunk → respond_from_chunk
+             └── guided → guided payload
   ↓
 select_chunk_for_question
   ├── dual retrieval (primary + rewrite query) → merge → topk=8
@@ -159,6 +174,17 @@ respond_from_chunk → LLM answer → policy → session → JSON
 - не literal-point query
 
 Модель: `gpt-5.4-mini`. Выбирает из топ-3 кандидатов.
+
+---
+
+## 6.1) Content arbiter — ключевые правила (P0)
+
+Арбитр не сравнивает score catalog vs retrieval напрямую (разные шкалы). Он использует тип кандидата, признаки «обзор/секция», topic-prefix и “зоны уверенности”.
+
+Ключевые правила:
+- **Cross-topic guard**: если catalog уверенно указывает на service overview, а retrieval нашёл `service_section` из другого topic — выбираем catalog (защита от «боковых» упоминаний услуг друг в друге).
+- **Non-specific guard** (`confident_catalog_over_mid_retrieval`): если catalog match уверенный, а retrieval top_score в средней зоне и вопрос без специфичного модификатора — предпочитаем catalog overview (защита от “делаете ли вы X / хочу X” → случайный FAQ в той же теме).
+- **Same topic**: Rule 1 (“specific retrieval wins over overview”) работает только внутри одного topic-prefix.
 
 ---
 
@@ -223,3 +249,11 @@ respond_from_chunk → LLM answer → policy → session → JSON
 - Полная multitenant-изоляция (один клиент `default`)
 - Большой рефакторинг `app.py`
 - Стриминг на бэкенде
+
+---
+
+## Приложение A) Smoke-eval для routing
+
+Минимальный регрессионный набор:
+- `evals/routing_smoke.md` — человекочитаемый список кейсов и ожиданий
+- `evals/routing_smoke_cases.json` + `tools/run_routing_smoke.py` — автопрогон `/ask` и проверка meta (`doc_id`/`intent`/`low_score`/route).

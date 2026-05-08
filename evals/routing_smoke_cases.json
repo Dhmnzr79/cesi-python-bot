@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "description": "Smoke: meta.topic (file→doc_id или matched_service_id), low_score, опционально intent/handoff. Текст ответа не проверяется.",
+  "cases": [
+    {
+      "id": "r01",
+      "q": "какая приживаемость имплантов?",
+      "expected_doc_any": ["implantation__faq__osseointegration"],
+      "forbidden_doc_id": "implantation__service__classic",
+      "expect_low_score": false
+    },
+    {
+      "id": "r02",
+      "q": "больно ли ставить имплант?",
+      "expected_doc_any": ["implantation__faq__pain"],
+      "forbidden_doc_id": "implantation__service__classic",
+      "expect_low_score": false
+    },
+    {
+      "id": "r03",
+      "q": "если кости мало, что делать?",
+      "expected_doc_any": ["implantation__info__bone_graft"],
+      "forbidden_doc_id": "implantation__service__classic",
+      "expect_low_score": false
+    },
+    {
+      "id": "r04",
+      "q": "какие противопоказания к имплантации?",
+      "expected_doc_any": ["implantation__info__contraindications"],
+      "forbidden_doc_id": "implantation__service__classic",
+      "expect_low_score": false
+    },
+    {
+      "id": "r05",
+      "q": "расскажите про классическую имплантацию",
+      "expected_doc_any": ["implantation__service__classic"],
+      "expect_low_score": false
+    },
+    {
+      "id": "r06",
+      "q": "что такое all-on-4?",
+      "expected_doc_any": ["implantation__service__all_on_4"],
+      "expect_low_score": false
+    },
+    {
+      "id": "r07",
+      "q": "сколько стоит имплантация?",
+      "expect_intent": "price_lookup",
+      "expect_low_score": false
+    },
+    {
+      "id": "r08",
+      "q": "почему так дорого?",
+      "expect_intent": "price_concern",
+      "expect_low_score": false
+    },
+    {
+      "id": "r09",
+      "q": "где вы находитесь?",
+      "expected_doc_any": ["clinic__info__contacts"],
+      "expect_low_score": false
+    },
+    {
+      "id": "r10",
+      "q": "какие у вас врачи имплантологи?",
+      "expected_doc_any": ["doctors__doctor__overview"],
+      "expect_low_score": false
+    }
+  ]
+}

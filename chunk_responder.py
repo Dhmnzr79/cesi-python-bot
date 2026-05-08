@@ -74,6 +74,7 @@ def _apply_response_policy_compat(
     pre_doc_turn_count: int | None,
     session_id: str | None = None,
     client_id: str | None = None,
+    booking: bool | None = None,
 ) -> dict:
     kw: dict = {
         "payload": payload,
@@ -88,6 +89,8 @@ def _apply_response_policy_compat(
         kw["session_id"] = session_id
     if "client_id" in _APPLY_POLICY_PARAMS:
         kw["client_id"] = client_id
+    if "booking" in _APPLY_POLICY_PARAMS:
+        kw["booking"] = booking
     return apply_response_policy(**kw)
 
 
@@ -138,10 +141,14 @@ def respond_from_chunk(
     llm_question: str | None = None,
     log_event: str = "Answer generated",
     route: str = "retrieval_chunk",
+    meta_overrides: dict | None = None,
+    booking: bool | None = None,
 ):
     if (q or "").strip():
         mem_add_user(sid, q)
     meta = meta_for_chunk(chunk, client_id=client_id)
+    if isinstance(meta_overrides, dict) and meta_overrides:
+        meta.update(meta_overrides)
     doc_id = meta.get("doc_id")
     if doc_id:
         set_current_doc(sid, doc_id)
@@ -186,6 +193,7 @@ def respond_from_chunk(
         pre_doc_turn_count=pre_turn,
         session_id=sid,
         client_id=client_id,
+        booking=booking,
     )
     refs_before_ui = list(payload.get("quick_replies") or [])
     payload = normalize_policy_payload(payload)
@@ -244,6 +252,8 @@ def respond_from_chunk_stream(
     llm_question: str | None = None,
     log_event: str = "Answer generated",
     route: str = "retrieval_chunk",
+    meta_overrides: dict | None = None,
+    booking: bool | None = None,
 ):
     """Generator yielding SSE strings: text_delta → ui → done.
 
@@ -253,6 +263,8 @@ def respond_from_chunk_stream(
     if (q or "").strip():
         mem_add_user(sid, q)
     meta = meta_for_chunk(chunk, client_id=client_id)
+    if isinstance(meta_overrides, dict) and meta_overrides:
+        meta.update(meta_overrides)
     doc_id = meta.get("doc_id")
     if doc_id:
         set_current_doc(sid, doc_id)
@@ -312,6 +324,7 @@ def respond_from_chunk_stream(
         pre_doc_turn_count=pre_turn,
         session_id=sid,
         client_id=client_id,
+        booking=booking,
     )
     refs_before_ui = list(payload.get("quick_replies") or [])
     payload = normalize_policy_payload(payload)

@@ -172,6 +172,22 @@ def build_ask_response(
             "phone": profile.get("phone"),
         },
     }
+    doc_for_meta = (meta.get("doc_id") or "").strip()
+    if not doc_for_meta and md_file:
+        doc_for_meta = (os.path.splitext(os.path.basename(md_file or ""))[0] or "").strip()
+    if doc_for_meta:
+        meta_out["doc_id"] = doc_for_meta
+    # Optional telemetry fields (additive, safe for UI).
+    # We intentionally preserve explicit nulls (e.g. matched_service_id: null).
+    for k in (
+        "intent",
+        "route_source",
+        "fallback_reason",
+        "matched_service_id",
+        "concern_ref",
+    ):
+        if k in meta:
+            meta_out[k] = meta.get(k)
     if client_id is not None:
         meta_out["client_id"] = client_id
 

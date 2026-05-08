@@ -237,6 +237,7 @@ def handle_flows(
     service_payload,
     get_last_content_ui_payload,
     get_topic_state,
+    booking: bool | None = None,
 ) -> dict | None:
     """Return {'payload': dict, 'doc_id': str|None} when flow handled.
 
@@ -288,7 +289,8 @@ def handle_flows(
             service_payload=service_payload,
         )
 
-    if q and booking_intent(q, sid=sid, client_id=client_id) and not is_active_lead_flow(st):
+    wants_booking = bool(booking) if booking is not None else booking_intent(q, sid=sid, client_id=client_id)
+    if q and wants_booking and not is_active_lead_flow(st):
         mark_booking_intent_ever(sid)
         set_lead_intent(sid, "collecting_name")
         return {
