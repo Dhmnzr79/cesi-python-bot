@@ -126,6 +126,49 @@ def _ensure_tables(conn) -> None:
             """
         )
 
+        # v5 trace-level logging schema (see `docs/ARCHITECTURE V5.md` §E1).
+        # Phase 0: schema only (no runtime writes yet).
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS v5_turn_traces (
+                turn_id TEXT PRIMARY KEY,
+                ts TIMESTAMPTZ NOT NULL,
+                sid TEXT,
+                client_id TEXT,
+                request_id TEXT,
+
+                gate_traces JSONB NOT NULL DEFAULT '[]'::jsonb,
+                decision_frame JSONB,
+                source_routing JSONB,
+                retrieval_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
+                arbiter_decision JSONB,
+                generator_input JSONB,
+                verifier_verdict JSONB,
+                final_payload JSONB,
+                latency_ms JSONB,
+                errors JSONB NOT NULL DEFAULT '[]'::jsonb
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_v5_turn_traces_time
+            ON v5_turn_traces (ts DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_v5_turn_traces_client_time
+            ON v5_turn_traces (client_id, ts DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_v5_turn_traces_sid_time
+            ON v5_turn_traces (sid, ts DESC);
+            """
+        )
+
 
 def _insert_bot_event(conn, row: dict) -> None:
     from psycopg.types.json import Json

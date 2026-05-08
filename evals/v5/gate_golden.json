@@ -1,0 +1,33 @@
+[
+  {
+    "id": "g1_clinic_contacts_gate",
+    "question": "Как до вас добраться?",
+    "expected_gate": "contacts"
+  },
+  {
+    "id": "g2_clinic_location_map_gate",
+    "question": "Можно ссылку на карту?",
+    "expected_gate": "contacts"
+  },
+  {
+    "id": "g3_needs_clarification_candidate",
+    "question": "мм… а вы вообще можете подсказать?",
+    "expected_gate": "clarify"
+  },
+  {
+    "id": "g4_unknown_smalltalk_or_ack",
+    "question": "понятно",
+    "expected_gate": "smalltalk_or_acknowledge"
+  },
+  {
+    "id": "g5_unknown_clarify_request",
+    "question": "подскажите пожалуйста",
+    "expected_gate": "clarify"
+  },
+  {
+    "id": "g6_unknown_noise",
+    "question": "???",
+    "expected_gate": "noise"
+  }
+]
+

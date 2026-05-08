@@ -1,0 +1,36 @@
+[
+  {
+    "id": "a1_pick_faq_specific",
+    "question": "Больно ли ставить имплант?",
+    "candidates": [
+      {"ref": "implantation__faq__pain.md#korotko", "doc_type": "faq", "topic": "implantation"},
+      {"ref": "implantation__service__overview.md#korotko", "doc_type": "service", "topic": "implantation"}
+    ],
+    "expected": {
+      "selected_ref": "implantation__faq__pain.md#korotko"
+    }
+  },
+  {
+    "id": "a2_pick_contacts_doc",
+    "question": "Какой у вас адрес?",
+    "candidates": [
+      {"ref": "clinic__info__contacts.md#korotko", "doc_type": "contacts", "topic": "clinic"},
+      {"ref": "clinic__info__warranty.md#korotko", "doc_type": "info", "topic": "clinic"}
+    ],
+    "expected": {
+      "selected_ref": "clinic__info__contacts.md#korotko"
+    }
+  },
+  {
+    "id": "a3_pick_pricing_overview",
+    "question": "Какая стоимость имплантации?",
+    "candidates": [
+      {"ref": "implantation__pricing__implants.md#korotko", "doc_type": "pricing", "topic": "implantation"},
+      {"ref": "implantation__faq__duration.md#korotko", "doc_type": "faq", "topic": "implantation"}
+    ],
+    "expected": {
+      "selected_ref": "implantation__pricing__implants.md#korotko"
+    }
+  }
+]
+

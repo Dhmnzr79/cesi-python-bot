@@ -1,0 +1,30 @@
+[
+  {
+    "id": "g1_faithfulness_basic",
+    "source_ref": "implantation__faq__pain.md#korotko",
+    "source_text": "Имплантация проводится под анестезией. Дискомфорт возможен, но врач подбирает обезболивание индивидуально.",
+    "answer": "Имплантация проводится под анестезией. Возможен дискомфорт, а врач подберёт обезболивание индивидуально.",
+    "expected": {
+      "faithful": true
+    }
+  },
+  {
+    "id": "g2_hallucinated_fact",
+    "source_ref": "clinic__info__warranty.md#korotko",
+    "source_text": "Условия гарантии обсуждаются индивидуально и фиксируются в документах.",
+    "answer": "Гарантия 5 лет на все импланты.",
+    "expected": {
+      "faithful": false
+    }
+  },
+  {
+    "id": "g3_no_numbers_added",
+    "source_ref": "implantation__pricing__implants.md#korotko",
+    "source_text": "Стоимость зависит от плана лечения и подбирается на консультации.",
+    "answer": "Стоимость зависит от плана лечения и подбирается на консультации.",
+    "expected": {
+      "faithful": true
+    }
+  }
+]
+

@@ -971,6 +971,7 @@ _INTENT_CLASSIFY_SYSTEM = (
 def classify_intent(
     user_message: str, *, client_id: str | None, sid: str
 ) -> str:
+    # DEPRECATED — replaced by resolver.resolve_decision_frame(), see DEPRECATED.md, removed in PR #2.1
     msg = (user_message or "").strip()
     if len(msg) < 2:
         return "content"

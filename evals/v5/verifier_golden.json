@@ -1,0 +1,27 @@
+[
+  {
+    "id": "v1_numbers_should_trigger",
+    "source_snippet": "Гарантия обсуждается на консультации и зависит от случая.",
+    "answer": "Гарантия 3 года.",
+    "expected": {
+      "grounded": false
+    }
+  },
+  {
+    "id": "v2_modal_claim",
+    "source_snippet": "Окончательное решение принимает врач на консультации.",
+    "answer": "Вам точно можно делать имплантацию.",
+    "expected": {
+      "grounded": false
+    }
+  },
+  {
+    "id": "v3_grounded_ok",
+    "source_snippet": "Процедура проходит под анестезией.",
+    "answer": "Процедура проходит под анестезией.",
+    "expected": {
+      "grounded": true
+    }
+  }
+]
+

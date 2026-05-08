@@ -1,0 +1,241 @@
+[
+  {
+    "id": "r1_basic_content_implantation",
+    "question": "Как проходит имплантация?",
+    "expected": {
+      "route_intent": "content",
+      "service_topic": "implantation",
+      "query_mode": "process"
+    }
+  },
+  {
+    "id": "r2_price_lookup",
+    "question": "Сколько стоит имплантация?",
+    "expected": {
+      "route_intent": "price_lookup",
+      "service_topic": "implantation",
+      "query_mode": "specific"
+    }
+  },
+  {
+    "id": "r3_price_concern",
+    "question": "Почему так дорого импланты?",
+    "expected": {
+      "route_intent": "price_concern",
+      "service_topic": "implantation",
+      "query_mode": "overview"
+    }
+  },
+  {
+    "id": "r4_doctors",
+    "question": "Какие врачи у вас делают имплантацию?",
+    "expected": {
+      "route_intent": "content",
+      "service_topic": "doctors",
+      "query_mode": "specific"
+    }
+  },
+  {
+    "id": "r6_implantation_overview",
+    "question": "Расскажите про имплантацию в целом",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "overview"}
+  },
+  {
+    "id": "r7_implantation_comparison",
+    "question": "Чем имплантация лучше протезирования?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "comparison"}
+  },
+  {
+    "id": "r8_implantation_qualification",
+    "question": "Подходит ли мне имплантация?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r9_implantation_specific",
+    "question": "Какие импланты вы ставите?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r10_implantation_process",
+    "question": "Какие этапы имплантации?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "process"}
+  },
+  {
+    "id": "r11_price_lookup_implants",
+    "question": "Прайс на имплантацию есть?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r12_price_lookup_prosthetics",
+    "question": "Сколько стоит протезирование?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "prosthetics", "query_mode": "specific"}
+  },
+  {
+    "id": "r13_price_concern_prosthetics",
+    "question": "Почему протезирование такое дорогое?",
+    "expected": {"route_intent": "price_concern", "service_topic": "prosthetics", "query_mode": "overview"}
+  },
+  {
+    "id": "r15_clinic_hours",
+    "question": "Какой график работы?",
+    "expected": {"route_intent": "content", "service_topic": "clinic", "query_mode": "specific"}
+  },
+  {
+    "id": "r16_clinic_address",
+    "question": "Адрес клиники",
+    "expected": {"route_intent": "content", "service_topic": "clinic", "query_mode": "specific"}
+  },
+  {
+    "id": "r17_doctors_by_name",
+    "question": "Расскажите про доктора Иванова",
+    "expected": {"route_intent": "content", "service_topic": "doctors", "query_mode": "overview"}
+  },
+  {
+    "id": "r18_doctors_who_implants",
+    "question": "Кто из врачей делает имплантацию?",
+    "expected": {"route_intent": "content", "service_topic": "doctors", "query_mode": "specific"}
+  },
+  {
+    "id": "r19_prosthetics_overview",
+    "question": "Расскажите про протезирование",
+    "expected": {"route_intent": "content", "service_topic": "prosthetics", "query_mode": "overview"}
+  },
+  {
+    "id": "r20_prosthetics_process",
+    "question": "Как проходит протезирование?",
+    "expected": {"route_intent": "content", "service_topic": "prosthetics", "query_mode": "process"}
+  },
+  {
+    "id": "r21_prosthetics_comparison",
+    "question": "Что лучше: коронка или мост?",
+    "expected": {"route_intent": "content", "service_topic": "prosthetics", "query_mode": "comparison"}
+  },
+  {
+    "id": "r22_price_lookup_general",
+    "question": "Сколько будет стоить лечение?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "unknown", "query_mode": "specific"}
+  },
+  {
+    "id": "r23_price_concern_general",
+    "question": "Почему у вас так дорого?",
+    "expected": {"route_intent": "price_concern", "service_topic": "unknown", "query_mode": "specific"}
+  },
+  
+  {
+    "id": "r26_implantation_timing",
+    "question": "Сколько по времени длится имплантация?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r27_implantation_pain",
+    "question": "Больно ли ставить имплант?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r28_implantation_contra",
+    "question": "Какие противопоказания к имплантации?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r29_implantation_aftercare",
+    "question": "Что делать после установки импланта?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "process"}
+  },
+  {
+    "id": "r30_prosthetics_price_concern",
+    "question": "Можно ли сделать дешевле протезирование?",
+    "expected": {"route_intent": "price_concern", "service_topic": "prosthetics", "query_mode": "specific"}
+  },
+  {
+    "id": "r31_clinic_warranty",
+    "question": "Какая гарантия?",
+    "expected": {"route_intent": "content", "service_topic": "clinic", "query_mode": "specific"}
+  },
+  {
+    "id": "r32_doctors_specialty",
+    "question": "Есть ли у вас имплантолог?",
+    "expected": {"route_intent": "content", "service_topic": "doctors", "query_mode": "specific"}
+  },
+  {
+    "id": "r33_implantation_vs_braces",
+    "question": "Имплантация или брекеты — что лучше?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "comparison"}
+  },
+  {
+    "id": "r34_prosthetics_materials",
+    "question": "Какие материалы для коронок бывают?",
+    "expected": {"route_intent": "content", "service_topic": "prosthetics", "query_mode": "specific"}
+  },
+  {
+    "id": "r35_price_lookup_crown",
+    "question": "Сколько стоит коронка?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "prosthetics", "query_mode": "specific"}
+  },
+  {
+    "id": "r36_clinic_payment",
+    "question": "Можно ли оплатить картой?",
+    "expected": {"route_intent": "content", "service_topic": "clinic", "query_mode": "specific"}
+  },
+  {
+    "id": "r37_clinic_consultation",
+    "question": "Консультация бесплатная?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "clinic", "query_mode": "specific"}
+  },
+  {
+    "id": "r38_doctors_experience",
+    "question": "Какой опыт у ваших врачей?",
+    "expected": {"route_intent": "content", "service_topic": "doctors", "query_mode": "overview"}
+  },
+  {
+    "id": "r39_implantation_immediate",
+    "question": "Можно ли поставить имплант сразу после удаления?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r40_prosthetics_removable",
+    "question": "Съёмные протезы — это как вообще устроено?",
+    "expected": {"route_intent": "content", "service_topic": "prosthetics", "query_mode": "overview"}
+  },
+  {
+    "id": "r41_implantation_guarantee_concern",
+    "question": "А если имплант не приживется, что тогда?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  {
+    "id": "r42_price_lookup_install",
+    "question": "Сколько стоит установка импланта под ключ?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "implantation", "query_mode": "specific"}
+  },
+  
+  {
+    "id": "r45_doctors_list",
+    "question": "Какие специалисты у вас есть?",
+    "expected": {"route_intent": "content", "service_topic": "doctors", "query_mode": "overview"}
+  },
+  {
+    "id": "r46_implantation_steps_specific",
+    "question": "Сколько этапов установки импланта и какие они?",
+    "expected": {"route_intent": "content", "service_topic": "implantation", "query_mode": "process"}
+  },
+  {
+    "id": "r47_prosthetics_steps_specific",
+    "question": "Этапы изготовления коронки",
+    "expected": {"route_intent": "content", "service_topic": "prosthetics", "query_mode": "process"}
+  },
+  {
+    "id": "r48_price_concern_discount",
+    "question": "А есть скидки? Дорого выходит.",
+    "expected": {"route_intent": "price_concern", "service_topic": "unknown", "query_mode": "specific"}
+  },
+  {
+    "id": "r49_price_lookup_discount",
+    "question": "Сколько будет стоить со скидкой?",
+    "expected": {"route_intent": "price_lookup", "service_topic": "unknown", "query_mode": "specific"}
+  },
+  {
+    "id": "r50_clinic_about",
+    "question": "Расскажите о клинике",
+    "expected": {"route_intent": "content", "service_topic": "clinic", "query_mode": "overview"}
+  }
+]
+
