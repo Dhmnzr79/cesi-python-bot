@@ -60,12 +60,14 @@ reason:      str
 ### 1.3 `SourceRouteResult` (выход A3)
 
 ```yaml
-source:       catalog_facts | catalog_md | price_card | doctor | contacts | none
+source:       catalog_facts | catalog_md | price_card | price_ref | price_lookup_clarify
+              | price_concern | doctor | contacts | none
 service_id:   str | null
 ref:          str | null       # для catalog_md = doc_id с приоритетом для retrieval
 concern_ref:  str | null       # для price_concern: ref на md-чанк из каталога (аналог price_ref)
-payload:      dict | null      # готовый payload для catalog_facts/price_card/doctor/contacts
+payload:      dict | null      # готовый payload для catalog_facts / price-карты / doctor
 match_score:  float
+match_method: catalog_containment | session_fallback | doctors_lookup | concern_default | none
 ```
 
 Имплементация: при появлении ветки `concern_ref` в рантайме — расширить Pydantic `SourceRouteResult` в `contracts/source_route_result.py` в том же PR, что подключает чтение `concern_ref` из каталога.

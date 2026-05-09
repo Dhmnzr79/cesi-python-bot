@@ -177,6 +177,8 @@ def respond_from_chunk(
         client_id=client_id,
         topic_state=tstate,
     )
+    if route == "price_concern":
+        payload.setdefault("meta", {})["intent"] = "price_concern"
     payload = _apply_response_policy_compat(
         payload,
         st,
@@ -303,6 +305,8 @@ def respond_from_chunk_stream(
         client_id=client_id,
         topic_state=tstate,
     )
+    if route == "price_concern":
+        payload.setdefault("meta", {})["intent"] = "price_concern"
     payload = _apply_response_policy_compat(
         payload,
         st,

@@ -327,6 +327,21 @@ def _lookup_intent_by_rules(q: str) -> str:
     return "other"
 
 
+def price_rules_hint(q: str) -> str | None:
+    """Deterministic price intent from regex rules (runs before Resolver output)."""
+    v = _lookup_intent_by_rules(q)
+    if v == "price_concern":
+        return "price_concern"
+    if v == "price_lookup":
+        return "price_lookup"
+    return None
+
+
+def catalog_service_session_context(sid: str | None, client_id: str | None) -> dict | None:
+    """Public wrapper for `_service_from_session_context` (A3 session fallback)."""
+    return _service_from_session_context(sid, client_id)
+
+
 def classify_price_route_intent(q: str, *, client_id: str | None, sid: str | None) -> str:
     rule_intent = _lookup_intent_by_rules(q)
     if rule_intent != "other":
@@ -512,6 +527,7 @@ def select_price_service_route(
 
 
 def select_catalog_content_route(q: str, *, client_id: str | None) -> dict:
+    # DEPRECATED — replaced by source_routing.route_source (A3 catalog branches); see DEPRECATED.md, removed in PR #2.1
     """Информационный маршрут по service_catalog (без ценового интента).
 
     Гибрид:

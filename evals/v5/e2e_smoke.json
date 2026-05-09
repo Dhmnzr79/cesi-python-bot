@@ -1,5 +1,5 @@
 {
-  "baseline": 31,
+  "baseline": 35,
   "known_v4_failures": [
     {
       "case_id": "smoke_multi_turn_all_on_4_price",
@@ -145,8 +145,8 @@
       "question": "почему дорого?",
       "must_contain": ["материал"],
       "must_not_contain": ["уточнить у администратор", "записать вас на консультац"],
-      "expected_route": "retrieval_chunk",
-      "comment": "v4 fail: price_concern path не fallback'ит на content retrieval, когда сервис не найден в каталоге. Retrieval бы нашёл implantation__faq__cost.md (alias 0.93), но не вызывается. Fix в PR #1.4 (Source routing A3).",
+      "expected_route": "price_concern",
+      "comment": "price_concern без матча услуги: A3 уводит на default concern_ref (implantation__faq__cost).",
       "coverage_class": "STRONG"
     },
 

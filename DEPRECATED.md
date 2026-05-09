@@ -24,6 +24,7 @@
 | Что | File:line | Заменено на | Помечено в PR | Удалить в PR |
 |---|---|---|---|---|
 | `llm.py:classify_intent` | `llm.py:971` | `resolver.py:resolve_with_fallback()` + запись trace в `pg_sink` из `app.py` | PR #1.2 | PR #2.1 |
+| `query_selector.py:select_catalog_content_route` | `query_selector.py:select_catalog_content_route` | `source_routing.route_source` + `content_arbiter.collect_content_candidates` hint | PR #1.3 | PR #2.1 |
 
 ---
 
@@ -44,6 +45,7 @@
 | Topic-leak в multi-turn retrieval | reverted in PR #1.3-revert | Было в раннем PR под номером #1.3: жёсткий `scope_topic` в `retrieve()`. Отключено до A3. В runtime scope остаётся в shadow/disable до **PR #1.4** (topic-scope reactivation **после** **PR #1.3** Source routing A3); в trace — `retrieval_scope_topic`. |
 | Session bridge для `service_id` из истории | reverted PR #1.3.1-revert | Отдельная склейка `service_id` по session отменена; fallback остаётся через `session.last_service_id` в ценовом пути до A3 в полном объёме. |
 | Хардкод-шаблон цены в `ux_builder.py` | PR #1.2.7 | Заменён на default `price_ref` → `clinic__info__payment_terms.md#korotko` + price-aware инструкция в `llm_question` (`app.py`). |
+| Multi-turn service_id resolution через session | PR #1.3 | Закреплено в `SourceRouteResult.match_method="session_fallback"` в `source_routing.py` (детерминированно вместо неявного поведения `query_selector`). |
 
 ---
 
@@ -57,7 +59,6 @@
 | `retriever.py:_alias_hit_score_raw_for_chunk` (12-band) | — (удаляется сразу) | PR #1.10 |
 | `retriever.py:_lemma_alias_channel`, `_trigram_alias_channel` | — (удаляется сразу) | PR #1.10 |
 | `query_selector.py:_match_score`, `_match_score_lemma` (magic-band) | PR #1.3 | PR #2.1 |
-| `query_selector.py:select_catalog_content_route` | PR #1.3 | PR #2.1 |
 | `config.py:ALIAS_STRONG_THRESHOLD`, `ALIAS_SOFT_THRESHOLD` | PR #1.10 | PR #2.2 |
 | `config.py:LOW_SCORE_THRESHOLD` | PR #1.4 | PR #2.2 |
 | `config.py:PRICE_SERVICE_MATCH_STRONG` | PR #1.3 | PR #2.2 |

@@ -1,13 +1,5 @@
 # Active Technical Debt v5
 
-## Multi-turn service_id resolution (Resolver)
-
-Resolver не извлекает service_id из history для коротких follow-ups («А сколько стоит?» после «Сколько стоит All-on-4?»). Сейчас catalog matching берёт service_id из session.last_service_id как fallback — работает.
-
-**Кандидат на полный fix:** PR #1.3 (Source routing A3) — закрепит session fallback в детерминированном правиле.
-
----
-
 ## Contacts intent post-Resolver overlay (PR #1.3)
 
 В app.py есть тонкий overlay после Resolver: если CONTACTS_RE matched после Resolver → принудительно intent='contacts'. Это дублирует A1 hard gate, потому что Resolver не выдаёт contacts в route_intent.

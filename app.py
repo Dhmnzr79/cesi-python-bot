@@ -40,9 +40,9 @@ from llm import classify_handoff_filter, classify_intent
 from resolver import maybe_start_shadow_resolver, resolve_with_fallback
 from content_arbiter import collect_content_candidates, select_content_route
 from query_selector import DEFAULT_PRICE_FALLBACK_REF
-from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
+from source_routing import route_source, slim_source_route_payload
 from policy import (
     apply_response_policy,
     contacts_intent,
@@ -479,6 +479,136 @@ def _with_default_anchor(md_entry_ref: str) -> str:
     return ref if "#" in ref else f"{ref}#korotko"
 
 
+def _orchestrate_price_matched_from_route(
+    *,
+    q: str,
+    sid: str,
+    client_id: str,
+    price_route: dict,
+    decision,
+) -> AskOrchestrationResult:
+    intent = str(price_route.get("intent") or "other")
+    request.ctx["effective_intent"] = str(intent)
+    service = price_route.get("service") or {}
+    service_id = str(price_route.get("matched_service_id") or "")
+    match_score = float(price_route.get("match_score") or 0.0)
+    route_source = str(price_route.get("route_source") or "catalog")
+    if service_id:
+        set_last_catalog_service(sid, service_id)
+    if intent == "price_concern":
+        concern_ref = str(service.get("concern_ref") or "").strip()
+        if concern_ref:
+            ch = get_chunk_by_ref(concern_ref, client_id=client_id)
+            if ch:
+                log_json(
+                    logger,
+                    "price_route",
+                    intent="price_concern",
+                    matched_service_id=service_id,
+                    match_score=round(match_score, 4),
+                    route_source="concern_ref",
+                    concern_ref=concern_ref,
+                    fallback_reason=None,
+                )
+                return AskOrchestrationResult(
+                    kind="chunk",
+                    q=q,
+                    sid=sid,
+                    client_id=client_id,
+                    chosen_chunk=ch,
+                    llm_question=q,
+                    log_event="Answer generated from concern_ref",
+                    chunk_route="price_concern",
+                    decision_frame=_orch_decision_dump(decision),
+                )
+        payload = build_price_concern_payload(
+            sid=sid, client_id=client_id, service_id=service_id, service=service, match_score=match_score
+        )
+        log_json(logger, "price_route", **payload.get("meta") or {})
+        return AskOrchestrationResult(
+            kind="service_reply",
+            q=q,
+            sid=sid,
+            client_id=client_id,
+            service_payload=payload,
+            service_doc_id=None,
+            service_track_user=True,
+            service_route="price_concern",
+            decision_frame=_orch_decision_dump(decision),
+        )
+    if route_source == "price_ref" and price_route.get("price_ref"):
+        ref_px = str(price_route.get("price_ref") or "").strip()
+        ch = get_chunk_by_ref(ref_px, client_id=client_id)
+        if ch:
+            log_json(
+                logger,
+                "price_route",
+                intent="price_lookup",
+                matched_service_id=service_id,
+                match_score=round(match_score, 4),
+                route_source="price_ref",
+                price_key=price_route.get("price_key"),
+                price_ref=ref_px,
+                fallback_reason=price_route.get("fallback_reason"),
+            )
+            if ref_px == DEFAULT_PRICE_FALLBACK_REF and not price_route.get("price_item"):
+                q0 = (q or "").strip()
+                llmq = (
+                    f"{q0}\n\n"
+                    "Контекст для ответа: точной цены на эту услугу в нашем каталоге "
+                    "сейчас нет. Сначала коротко признай это (например: «Точную "
+                    "стоимость лучше уточнить у администратора»), затем расскажи об "
+                    "условиях оплаты на основе материала ниже. Не выдумывай конкретные "
+                    "цифры. Будь дружелюбным."
+                )
+            else:
+                llmq = q or f"Цена по {ref_px}"
+            if str(price_route.get("fallback_reason") or "") == "context_session":
+                svc_ctx = price_route.get("service") if isinstance(price_route.get("service"), dict) else {}
+                ttl = str(svc_ctx.get("title") or price_route.get("matched_service_id") or "").strip()
+                if ttl:
+                    llmq = (
+                        f"{llmq}\n\n"
+                        f"Контекст: пользователь продолжает вопрос об услуге «{ttl}». "
+                        "Упомяни в ответе это название или короткий синоним из каталога "
+                        "(например all-on-4), чтобы было ясно, о какой услуге речь."
+                    )
+            return AskOrchestrationResult(
+                kind="chunk",
+                q=q,
+                sid=sid,
+                client_id=client_id,
+                chosen_chunk=ch,
+                llm_question=llmq,
+                log_event="Answer generated from price_ref",
+                chunk_route="price_lookup",
+                decision_frame=_orch_decision_dump(decision),
+            )
+    payload = build_price_lookup_payload(
+        sid=sid,
+        client_id=client_id,
+        service_id=service_id,
+        service=service,
+        match_score=match_score,
+        route_source=route_source,
+        price_key=price_route.get("price_key"),
+        price_ref=price_route.get("price_ref"),
+        price_item=price_route.get("price_item"),
+    )
+    log_json(logger, "price_route", **payload.get("meta") or {})
+    return AskOrchestrationResult(
+        kind="service_reply",
+        q=q,
+        sid=sid,
+        client_id=client_id,
+        service_payload=payload,
+        service_doc_id=None,
+        service_track_user=True,
+        service_route="price_lookup",
+        decision_frame=_orch_decision_dump(decision),
+    )
+
+
 def _load_prices_for_client(client_id: str | None) -> dict:
     cid = (client_id or DEFAULT_CLIENT_ID).strip() or DEFAULT_CLIENT_ID
     p = os.path.join("clients", cid, "prices.json")
@@ -657,6 +787,7 @@ def finalize_ask(
                 ),
                 "legacy_intent": request.ctx.get("legacy_intent"),
                 "effective_intent": str(request.ctx.get("effective_intent") or ""),
+                "source_route_decision": request.ctx.get("source_route_decision"),
             },
         )
     cta = payload.get("cta")
@@ -1028,65 +1159,153 @@ def _orchestrate_ask_turn(data: dict):
             picked = get_chunk_by_ref("clinic__info__contacts.md#korotko", client_id=client_id)
         if picked:
             return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=picked, llm_question=q, log_event='Answer generated from contacts intent', chunk_route='contacts_chunk', decision_frame=_orch_decision_dump(decision))
-    if intent in ('price_lookup', 'price_concern'):
-        price_route = select_price_service_route(q, client_id=client_id, sid=sid, intent_override=intent)
+    md_catalog_priority_ref = None
+    md_catalog_priority_sid = None
+    md_catalog_priority_score = None
+    if intent != 'contacts':
+        sr = route_source(q, sid=sid, client_id=client_id, decision=decision, app_intent=intent)
+        srd = slim_source_route_payload(sr)
+        request.ctx['source_route_decision'] = srd
+        emit_bot_event(logger, 'source_route_decision', status='ok', details=srd)
+        if sr.source == 'doctor' and sr.ref:
+            ch = get_chunk_by_ref(sr.ref, client_id=client_id)
+            if ch:
+                return AskOrchestrationResult(
+                    kind='chunk',
+                    q=q,
+                    sid=sid,
+                    client_id=client_id,
+                    chosen_chunk=ch,
+                    llm_question=q or f'Информация о враче ({sr.ref})',
+                    log_event='Answer generated from doctors_lookup',
+                    chunk_route='retrieval_chunk',
+                    decision_frame=_orch_decision_dump(decision),
+                )
+        if sr.source == 'catalog_facts' and sr.payload:
+            svc = (sr.payload.get('service') or {}) if isinstance(sr.payload, dict) else {}
+            sid_svc = str(sr.service_id or sr.payload.get('matched_service_id') or '')
+            payload = build_service_facts_card_payload(
+                sid=sid,
+                client_id=client_id,
+                service_id=sid_svc,
+                service=svc,
+                match_score=float(sr.match_score or 0.0),
+                user_question=q,
+            )
+            price_line = _service_price_line_for_content(svc, client_id)
+            price_applied = False
+            if price_line:
+                base = (payload.get('answer') or '').strip()
+                payload['answer'] = f'{base}\n\n{price_line}' if base else price_line
+                payload.setdefault('meta', {})['price_display_applied'] = 'always'
+                price_applied = True
+            log_json(logger, 'catalog_route', route='facts', matched_service_id=sid_svc, match_score=sr.match_score)
+            if sid_svc:
+                set_last_catalog_service(sid, sid_svc)
+            emit_bot_event(
+                logger,
+                'content_arbiter_price_injection',
+                status='ok',
+                details={'selected_route': 'catalog_facts_a3', 'price_line_applied': bool(price_applied), 'matched_service_id': sid_svc},
+            )
+            return AskOrchestrationResult(
+                kind='service_reply',
+                q=q,
+                sid=sid,
+                client_id=client_id,
+                service_payload=payload,
+                service_doc_id=None,
+                service_track_user=True,
+                service_route='catalog_facts',
+                decision_frame=_orch_decision_dump(decision),
+            )
+        if sr.source == 'catalog_md' and sr.ref:
+            md_catalog_priority_ref = sr.ref
+            md_catalog_priority_sid = sr.service_id
+            md_catalog_priority_score = float(sr.match_score or 0.0)
+            if str(sr.match_method or "") == "session_fallback":
+                request.ctx["a3_catalog_md_session_hint"] = True
+        if sr.source in ('price_card', 'price_ref'):
+            pr_inner = (sr.payload or {}).get('price_route') if isinstance(sr.payload, dict) else None
+            if isinstance(pr_inner, dict):
+                return _orchestrate_price_matched_from_route(
+                    q=q, sid=sid, client_id=client_id, price_route=pr_inner, decision=decision
+                )
+        if sr.source == 'price_concern' and sr.ref:
+            ch = get_chunk_by_ref(sr.ref, client_id=client_id)
+            if ch:
+                log_json(
+                    logger,
+                    'price_route',
+                    intent='price_concern',
+                    matched_service_id=sr.service_id,
+                    match_score=round(float(sr.match_score or 0.0), 4),
+                    route_source='concern_ref',
+                    concern_ref=str(sr.concern_ref or sr.ref),
+                    fallback_reason=str(sr.match_method),
+                )
+                return AskOrchestrationResult(
+                    kind='chunk',
+                    q=q,
+                    sid=sid,
+                    client_id=client_id,
+                    chosen_chunk=ch,
+                    llm_question=q,
+                    log_event='Answer generated from concern_ref',
+                    chunk_route='price_concern',
+                    decision_frame=_orch_decision_dump(decision),
+                )
+        if sr.source == 'price_lookup_clarify' and isinstance(sr.payload, dict):
+            pr_cl = sr.payload.get('price_route')
+            if isinstance(pr_cl, dict):
+                request.ctx['effective_intent'] = 'price_lookup'
+                payload_cl = build_price_clarify_payload(
+                    sid=sid,
+                    client_id=client_id,
+                    intent=str(pr_cl.get('intent') or 'price_lookup'),
+                    fallback_reason=str(pr_cl.get('fallback_reason') or 'service_not_found'),
+                )
+                log_json(logger, 'price_route', **payload_cl.get('meta') or {})
+                return AskOrchestrationResult(
+                    kind='service_reply',
+                    q=q,
+                    sid=sid,
+                    client_id=client_id,
+                    service_payload=payload_cl,
+                    service_doc_id=None,
+                    service_track_user=True,
+                    service_route='price_lookup',
+                    decision_frame=_orch_decision_dump(decision),
+                )
+    else:
+        request.ctx['source_route_decision'] = {
+            'source': 'contacts',
+            'ref': None,
+            'service_id': None,
+            'concern_ref': None,
+            'match_method': 'none',
+            'match_score': 0.0,
+        }
+
+    if intent == 'price_lookup':
+        price_route = select_price_service_route(q, client_id=client_id, sid=sid, intent_override='price_lookup')
         if price_route.get('mode') == 'clarify':
             payload = build_price_clarify_payload(sid=sid, client_id=client_id, intent=str(price_route.get('intent') or 'other'), fallback_reason=str(price_route.get('fallback_reason') or 'service_not_found'))
             log_json(logger, 'price_route', **payload.get('meta') or {})
             return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='price_lookup', decision_frame=_orch_decision_dump(decision))
         if price_route.get('mode') == 'matched':
-            intent = str(price_route.get('intent') or 'other')
-            request.ctx['effective_intent'] = str(intent)
-            service = price_route.get('service') or {}
-            service_id = str(price_route.get('matched_service_id') or '')
-            match_score = float(price_route.get('match_score') or 0.0)
-            route_source = str(price_route.get('route_source') or 'catalog')
-            if service_id:
-                set_last_catalog_service(sid, service_id)
-            if intent == 'price_concern':
-                concern_ref = str(service.get('concern_ref') or '').strip()
-                if concern_ref:
-                    ch = get_chunk_by_ref(concern_ref, client_id=client_id)
-                    if ch:
-                        log_json(logger, 'price_route', intent='price_concern', matched_service_id=service_id, match_score=round(match_score, 4), route_source='concern_ref', concern_ref=concern_ref, fallback_reason=None)
-                        return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=q, log_event='Answer generated from concern_ref', chunk_route='price_concern', decision_frame=_orch_decision_dump(decision))
-                payload = build_price_concern_payload(sid=sid, client_id=client_id, service_id=service_id, service=service, match_score=match_score)
-                log_json(logger, 'price_route', **payload.get('meta') or {})
-                return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='price_concern', decision_frame=_orch_decision_dump(decision))
-            if route_source == 'price_ref' and price_route.get('price_ref'):
-                ref = str(price_route.get('price_ref') or '').strip()
-                ch = get_chunk_by_ref(ref, client_id=client_id)
-                if ch:
-                    log_json(
-                        logger,
-                        'price_route',
-                        intent='price_lookup',
-                        matched_service_id=service_id,
-                        match_score=round(match_score, 4),
-                        route_source='price_ref',
-                        price_key=price_route.get('price_key'),
-                        price_ref=ref,
-                        fallback_reason=price_route.get('fallback_reason'),
-                    )
-                    if ref == DEFAULT_PRICE_FALLBACK_REF and not price_route.get('price_item'):
-                        q0 = (q or '').strip()
-                        llmq = (
-                            f"{q0}\n\n"
-                            "Контекст для ответа: точной цены на эту услугу в нашем каталоге "
-                            "сейчас нет. Сначала коротко признай это (например: «Точную "
-                            "стоимость лучше уточнить у администратора»), затем расскажи об "
-                            "условиях оплаты на основе материала ниже. Не выдумывай конкретные "
-                            "цифры. Будь дружелюбным."
-                        )
-                    else:
-                        llmq = q or f'Цена по {ref}'
-                    return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llmq, log_event='Answer generated from price_ref', chunk_route='price_lookup', decision_frame=_orch_decision_dump(decision))
-            payload = build_price_lookup_payload(sid=sid, client_id=client_id, service_id=service_id, service=service, match_score=match_score, route_source=route_source, price_key=price_route.get('price_key'), price_ref=price_route.get('price_ref'), price_item=price_route.get('price_item'))
-            log_json(logger, 'price_route', **payload.get('meta') or {})
-            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=payload, service_doc_id=None, service_track_user=True, service_route='price_lookup', decision_frame=_orch_decision_dump(decision))
-    if intent == 'content':
+            return _orchestrate_price_matched_from_route(
+                q=q, sid=sid, client_id=client_id, price_route=price_route, decision=decision
+            )
+    if intent == 'content' or md_catalog_priority_ref:
         cands = collect_content_candidates(
-            q=q, sid=sid, client_id=client_id, scope_topic=None
+            q=q,
+            sid=sid,
+            client_id=client_id,
+            scope_topic=None,
+            catalog_md_priority_ref=md_catalog_priority_ref,
+            catalog_md_priority_service_id=md_catalog_priority_sid,
+            catalog_md_priority_match_score=md_catalog_priority_score,
         )
         rdbg_turn = (cands.retrieval or {}).get('debug_meta') or {}
         if rdbg_turn.get('scope_widen_fallback'):
@@ -1110,6 +1329,14 @@ def _orchestrate_ask_turn(data: dict):
                     if price_line:
                         llm_q = f'{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}'
                         price_applied = True
+                    if request.ctx.get('a3_catalog_md_session_hint'):
+                        low = (q or '').lower()
+                        if 'врем' in low or 'срок' in low or 'сколько' in low:
+                            llm_q = (
+                                f'{llm_q}\n\n'
+                                'Пациент спрашивает про длительность или сроки по этой услуге. Ответь кратко и '
+                                'обязательно включи в ответ слово «срок» или «сроки» (типичный ориентир по этапам).'
+                            )
                     emit_bot_event(logger, 'content_arbiter_price_injection', status='ok', details={'selected_route': 'catalog_md_first', 'price_line_applied': bool(price_applied), 'md_entry_ref': md_ref, 'matched_service_id': sid_svc})
                     return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llm_q, log_event='Answer generated from md_entry_ref', chunk_route='catalog_md_first', decision_frame=_orch_decision_dump(decision))
         if sel.selected_route == 'catalog_facts':

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from config import ALIAS_STRONG_THRESHOLD
+from core.routing_loader import THRESHOLDS
 from query_selector import select_catalog_content_route, select_chunk_for_question
 from retriever import broad_query_detect, corpus_alias_leader, normalize_retrieval_query
 from session import mem_get
@@ -176,7 +177,14 @@ class ContentRouteResult:
 
 
 def collect_content_candidates(
-    *, q: str, sid: str, client_id: str | None, scope_topic: str | None = None
+    *,
+    q: str,
+    sid: str,
+    client_id: str | None,
+    scope_topic: str | None = None,
+    catalog_md_priority_ref: str | None = None,
+    catalog_md_priority_service_id: str | None = None,
+    catalog_md_priority_match_score: float | None = None,
 ) -> ContentCandidates:
     q_user = (q or "").strip()
     q_norm = normalize_retrieval_query(q_user) or q_user
@@ -237,6 +245,22 @@ def collect_content_candidates(
         "is_overview": cat_is_overview,
         "service": cat.get("service") if isinstance(cat.get("service"), dict) else {},
     }
+    prref = (catalog_md_priority_ref or "").strip()
+    if prref:
+        pri_score = catalog_md_priority_match_score
+        if pri_score is None:
+            pri_score = float(THRESHOLDS.catalog_match.containment_min)
+        cat_doc_id2 = _doc_id_from_ref(prref)
+        cat_anchor2 = _anchor_from_ref(prref)
+        catalog_candidate = {
+            "mode": "md_first",
+            "matched_service_id": catalog_md_priority_service_id or cat.get("matched_service_id"),
+            "match_score": pri_score,
+            "md_entry_ref": prref,
+            "doc_id": cat_doc_id2,
+            "is_overview": bool(prref and _is_overview_anchor(cat_anchor2)),
+            "service": cat.get("service") if isinstance(cat.get("service"), dict) else {},
+        }
     alias_candidate = {
         "leader": _slim_chunk_for_log(alias_leader) if isinstance(alias_leader, dict) else None,
         # Full chunk kept for immediate execution if selected; never log this.
