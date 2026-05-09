@@ -30,6 +30,26 @@ from retriever import (
     retrieve,
 )
 
+# PR #1.2.7: нет строки в prices.json и нет service price_ref → генерация из общего чанка условий оплаты.
+DEFAULT_PRICE_FALLBACK_REF = "clinic__info__payment_terms.md#korotko"
+
+
+def _apply_default_price_lookup_ref(
+    *,
+    route_source: str,
+    price_ref: Any,
+    price_item: dict | None,
+) -> tuple[str, str | None, str | None]:
+    """Для price_lookup: без price_item и без price_ref подставить общий MD; иначе без изменений."""
+    if price_item is not None:
+        pr = str(price_ref).strip() if price_ref else ""
+        return route_source, pr or None, None
+    pref = str(price_ref).strip() if price_ref else ""
+    if pref:
+        rs = "price_ref" if route_source == "catalog" else route_source
+        return rs, pref, None
+    return "price_ref", DEFAULT_PRICE_FALLBACK_REF, "default_payment_terms"
+
 
 def select_chunk_for_question(
     q: str,
@@ -407,19 +427,24 @@ def select_price_service_route(
     if not match.get("matched_service_id"):
         ctx = _service_from_session_context(sid, client_id)
         if ctx and intent == "price_lookup":
+            pi = ctx.get("price_item")
+            pr = ctx.get("price_ref")
+            rs = "prices_json" if pi is not None else ("price_ref" if (pr or "").strip() else "catalog")
+            rs, pr2, fb = _apply_default_price_lookup_ref(route_source=rs, price_ref=pr, price_item=pi)
+            fb_final = fb or "context_session"
             return {
                 "mode": "matched",
                 "intent": intent,
-                "route_source": "prices_json" if ctx.get("price_item") else ("price_ref" if ctx.get("price_ref") else "catalog"),
+                "route_source": rs,
                 "matched_service_id": ctx["service_id"],
                 "service": ctx["service"],
                 "match_score": 1.0,
                 "is_confident": True,
                 "price_key": ctx.get("price_key"),
-                "price_ref": ctx.get("price_ref"),
-                "price_item": ctx.get("price_item"),
+                "price_ref": pr2,
+                "price_item": pi,
                 "context_doc_id": ctx.get("context_doc_id"),
-                "fallback_reason": "context_session",
+                "fallback_reason": fb_final,
             }
         return {
             "mode": "clarify",
@@ -430,19 +455,24 @@ def select_price_service_route(
     if not match.get("is_confident"):
         ctx = _service_from_session_context(sid, client_id)
         if ctx and intent == "price_lookup":
+            pi = ctx.get("price_item")
+            pr = ctx.get("price_ref")
+            rs = "prices_json" if pi is not None else ("price_ref" if (pr or "").strip() else "catalog")
+            rs, pr2, fb = _apply_default_price_lookup_ref(route_source=rs, price_ref=pr, price_item=pi)
+            fb_final = fb or "context_session"
             return {
                 "mode": "matched",
                 "intent": intent,
-                "route_source": "prices_json" if ctx.get("price_item") else ("price_ref" if ctx.get("price_ref") else "catalog"),
+                "route_source": rs,
                 "matched_service_id": ctx["service_id"],
                 "service": ctx["service"],
                 "match_score": 1.0,
                 "is_confident": True,
                 "price_key": ctx.get("price_key"),
-                "price_ref": ctx.get("price_ref"),
-                "price_item": ctx.get("price_item"),
+                "price_ref": pr2,
+                "price_item": pi,
                 "context_doc_id": ctx.get("context_doc_id"),
-                "fallback_reason": "context_session",
+                "fallback_reason": fb_final,
             }
         return {
             "mode": "clarify",
@@ -462,6 +492,13 @@ def select_price_service_route(
         route_source = "price_ref"
     elif price_item is not None:
         route_source = "prices_json"
+    fallback_reason: str | None = None
+    if intent == "price_lookup":
+        route_source, price_ref, fallback_reason = _apply_default_price_lookup_ref(
+            route_source=route_source,
+            price_ref=price_ref,
+            price_item=price_item if isinstance(price_item, dict) else None,
+        )
     return {
         "mode": "matched",
         "intent": intent,
@@ -469,6 +506,7 @@ def select_price_service_route(
         "price_key": price_key,
         "price_ref": price_ref,
         "price_item": price_item if isinstance(price_item, dict) else None,
+        "fallback_reason": fallback_reason,
         **match,
     }
 

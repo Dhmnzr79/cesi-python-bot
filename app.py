@@ -39,6 +39,7 @@ from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
 from resolver import maybe_start_shadow_resolver, resolve_with_fallback
 from content_arbiter import collect_content_candidates, select_content_route
+from query_selector import DEFAULT_PRICE_FALLBACK_REF
 from query_selector import select_catalog_content_route
 from query_selector import select_chunk_for_question
 from query_selector import select_price_service_route
@@ -1056,8 +1057,29 @@ def _orchestrate_ask_turn(data: dict):
                 ref = str(price_route.get('price_ref') or '').strip()
                 ch = get_chunk_by_ref(ref, client_id=client_id)
                 if ch:
-                    log_json(logger, 'price_route', intent='price_lookup', matched_service_id=service_id, match_score=round(match_score, 4), route_source='price_ref', price_key=price_route.get('price_key'), price_ref=ref, fallback_reason=None)
-                    llmq = q or f'Цена по {ref}'
+                    log_json(
+                        logger,
+                        'price_route',
+                        intent='price_lookup',
+                        matched_service_id=service_id,
+                        match_score=round(match_score, 4),
+                        route_source='price_ref',
+                        price_key=price_route.get('price_key'),
+                        price_ref=ref,
+                        fallback_reason=price_route.get('fallback_reason'),
+                    )
+                    if ref == DEFAULT_PRICE_FALLBACK_REF and not price_route.get('price_item'):
+                        q0 = (q or '').strip()
+                        llmq = (
+                            f"{q0}\n\n"
+                            "Контекст для ответа: точной цены на эту услугу в нашем каталоге "
+                            "сейчас нет. Сначала коротко признай это (например: «Точную "
+                            "стоимость лучше уточнить у администратора»), затем расскажи об "
+                            "условиях оплаты на основе материала ниже. Не выдумывай конкретные "
+                            "цифры. Будь дружелюбным."
+                        )
+                    else:
+                        llmq = q or f'Цена по {ref}'
                     return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llmq, log_event='Answer generated from price_ref', chunk_route='price_lookup', decision_frame=_orch_decision_dump(decision))
             payload = build_price_lookup_payload(sid=sid, client_id=client_id, service_id=service_id, service=service, match_score=match_score, route_source=route_source, price_key=price_route.get('price_key'), price_ref=price_route.get('price_ref'), price_item=price_route.get('price_item'))
             log_json(logger, 'price_route', **payload.get('meta') or {})

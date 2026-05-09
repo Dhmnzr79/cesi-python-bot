@@ -31,8 +31,12 @@ Phase 0 — Foundation Artifacts (no runtime changes)
 Phase 1 — Core Pipeline (runtime, по слоям)
    ├── PR #1.1  Resolver (shadow)
    ├── PR #1.2  Resolver (safety-net on)
-   ├── PR #1.3  Topic-scoped retrieval
-   ├── PR #1.4  Source routing A3 (catalog hard route + 3 branches)
+   ├── PR #1.2.5  Refactor /ask + /ask/stream → один orchestrator [DONE]
+   ├── PR #1.2.6  Resolver prompt unification [DONE]
+   ├── PR #1.2.7  Default price fallback через md [DONE]
+   ├── PR #1.2.8  Smoke coverage_class + правки кейсов [DONE]
+   ├── PR #1.3  Source routing A3 (catalog hard route + 3 ветки)  ← было #1.4
+   ├── PR #1.4  Topic-scoped retrieval reactivation (с conflict guard)  ← было #1.3
    ├── PR #1.5  Doctors lookup (A3.3)
    ├── PR #1.6  Arbiter (shadow)
    ├── PR #1.7  Arbiter (on) + удаление 7 if-rules
@@ -234,36 +238,18 @@ docs/ARCHITECTURE V5.md.
 
 ---
 
-### PR #1.3 — Topic-scoped retrieval
+### PR #1.3 — Source routing A3 (catalog hard route + 3 ветки)
 
-**Цель:** retriever принимает `scope_topic` и фильтрует кандидатов.
+**Цель:** реализовать 3 ветки catalog match из `ARCHITECTURE V5.md §A3.1`. Закрывает класс багов «КТ» и унифицирует детерминированный выбор источника **до** topic-scoped retrieval.
 
-**Файлы:**
-- `retriever.py` — добавить параметр `scope_topic` в `retrieve()`.
-- `app.py` — передавать `DecisionFrame.service_topic` если `confidence.topic ≥ threshold`.
-
-**НЕ ТРОГАТЬ:** 12-band alias scorer (это PR #1.10), LLM rerank.
-
-**Acceptance:**
-- Cross-topic eval: 100% in-scope при уверенном топике.
-- Общий eval не падает.
-
-**Зависит от:** PR #1.2.
-
-**DEPRECATED:** ничего.
-
----
-
-### PR #1.4 — Source routing A3 (catalog hard route)
-
-**Цель:** реализовать 3 ветки catalog match из `ARCHITECTURE V5.md §A3.1`. Закрывает класс багов «КТ».
+**Почему до PR #1.4:** topic-scope из ранней попытки PR #1.3 (revert) ломал точные catalog/alias matches при ошибках Resolver-topic. Сначала — A3 hard route; затем (PR #1.4) — повторная активация scope с conflict guard.
 
 **Файлы:**
 - `source_routing.py` (новый) — оркестратор A3.
 - `query_selector.py:match_service_from_catalog` — упростить: containment + lemma-subset, wrapper stripping.
 - `app.py` — вставить A3 после Resolver и до A4.
 
-**Логика веток:**
+**Логика веток (A3.1):**
 ```
 match (containment ≥ THRESHOLDS.catalog_match.containment_min) И facts/price_key
     → SourceRouteResult{source: catalog_facts | price_card}, минуем A4/A5
@@ -273,14 +259,45 @@ no match
     → SourceRouteResult{source: none}, обычный A4
 ```
 
+Дополнительно в рамках A3 (см. `ARCHITECTURE V5.md §A3.2`):
+- Полный price routing (`price_ref`, default fallback на payment terms md, см. уже внедрённое в PR #1.2.7 — при имплементации A3 свести с контрактом).
+- **`session.last_service_id`** используется как fallback для multi-turn ценового/каталогового контекста, если текущая фраза не матчится в каталог.
+- **`intent = price_concern`** при наличии **`concern_ref`** в каталоге → `get_chunk_by_ref(concern_ref)` → LLM из чанка (поле см. §1.3 архитектуры).
+
+**Отдельный путь:** **Doctors lookup (A3.3)** остаётся в **PR #1.5** — детерминированная ветка по врачам.
+
 **Acceptance:**
 - Eval do_you_do (≥10 кейсов): все идут в catalog_facts, не в retrieval.
 - Кейс «Вы делаете КТ зубов?» → catalog_facts.
 - Wrapper stripping eval (5 кейсов): «вы делаете», «можно у вас», «есть ли» — все попадают в catalog.
+- E2E: `smoke_price_concern_*`, `smoke_multi_turn_all_on_4_price` → **PASS** (закрытие класса «ценовой контент без сервиса в каталоге» / перенос контекста).
 
 **Зависит от:** PR #1.2.
 
 **DEPRECATED:** часть `query_selector.py:select_catalog_content_route` — заменена `source_routing.py`.
+
+---
+
+### PR #1.4 — Topic-scoped retrieval reactivation
+
+**Цель:** снова активировать фильтрацию retrieval по **`scope_topic`** (`retriever.py`), сейчас в **shadow / отключено** после PR #1.3-revert. Это ослабленная версия первой попытки topic-scope (до того, как номера PR переставили: тогда это шло как «#1.3 Topic-scoped retrieval» в старой карте).
+
+**Conflict guard (обязательно):**
+- Если **catalog match ≥ 0.88** ИЛИ **alias_score ≥ 0.85** → **`scope_topic` игнорируется** для этого turn’а (каталог/алиас уже «победили» точнее Resolver-topic).
+
+**Файлы:**
+- `retriever.py` — применять `scope_topic` только если guard не сработал.
+- `app.py` — пробрасывать `DecisionFrame.service_topic` при выполнении порогов Resolver **и** guard.
+
+**НЕ ТРОГАТЬ:** 12-band alias scorer (PR #1.10), полная замена порогов вынесена в дорожную карту.
+
+**Acceptance:**
+- Cross-topic eval: высокая доля in-scope при уверенном топике без регрессий hard route.
+- E2E: оставшиеся **`smoke_multi_turn_*`** после стабилизации A3 (PR #1.3) → **PASS**.
+
+**Зависит от:** PR #1.3.
+
+**DEPRECATED:** ничего нового (пороги — только через `routing.yaml`).
 
 ---
 
@@ -312,7 +329,7 @@ no match
 - Source pick accuracy ≥ 85% на golden set.
 - В trace-логе видны и старый pick, и Arbiter pick.
 
-**Зависит от:** PR #1.3.
+**Зависит от:** PR #1.4.
 
 ---
 
@@ -387,7 +404,7 @@ or contains_time_promise(answer) or contains_warranty_claim(answer)
 - Общий eval не падает >2%.
 - Алиас-кейсы из `accuracy_full.json` — все зелёные.
 
-**Зависит от:** PR #1.3 (topic-scope включён, чтобы новый scorer не путался по корпусу).
+**Зависит от:** PR #1.4 (topic-scope с conflict guard включён, чтобы новый scorer не путался по корпусу).
 
 **DEPRECATED → REMOVED:** `_alias_hit_score_raw_for_chunk`, `_lemma_alias_channel`, `_trigram_alias_channel`.
 
@@ -678,7 +695,8 @@ or contains_time_promise(answer) or contains_warranty_claim(answer)
             #0.4 → #0.5
 
 Phase 1 chain:
-#0.5 → #1.1 → #1.2 → #1.3 → #1.4 → #1.5
+#0.5 → #1.1 → #1.2 → #1.2.5/#1.2.6/#1.2.7/#1.2.8 (micro, порядок фиксируется в git)
+              → #1.3 (A3 source routing) → #1.4 (topic-scope reactivation) → #1.5
                               ↓
                             #1.6 → #1.7 → #1.8 → #1.9
                                                   ↓
@@ -759,6 +777,6 @@ DEPRECATED после этого PR:
 - [ ] `DEPRECATED.md` создан и пуст.
 - [ ] CI настроен на запуск `corpus_lint` и (минимально) `v5_eval`.
 
-После этого — Phase 1 идёт линейно по PR #1.1 → #1.10. Параллельные треки B/C/D/E запускаются по мере появления зависимостей.
+После этого — Phase 1 идёт линейно по PR #1.1 → #1.10 (в т.ч. micro-PR #1.2.5–#1.2.8 и **переставленные #1.3 Source routing ↔ #1.4 topic-scope**). Параллельные треки B/C/D/E запускаются по мере появления зависимостей.
 
 **Один PR — один merge — один откат при необходимости. Никакого «v5 в main одной кнопкой».**

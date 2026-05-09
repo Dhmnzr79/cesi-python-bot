@@ -60,12 +60,15 @@ reason:      str
 ### 1.3 `SourceRouteResult` (выход A3)
 
 ```yaml
-source:      catalog_facts | catalog_md | price_card | doctor | contacts | none
-service_id:  str | null
-ref:         str | null       # для catalog_md = doc_id с приоритетом для retrieval
-payload:     dict | null      # готовый payload для catalog_facts/price_card/doctor/contacts
-match_score: float
+source:       catalog_facts | catalog_md | price_card | doctor | contacts | none
+service_id:   str | null
+ref:          str | null       # для catalog_md = doc_id с приоритетом для retrieval
+concern_ref:  str | null       # для price_concern: ref на md-чанк из каталога (аналог price_ref)
+payload:      dict | null      # готовый payload для catalog_facts/price_card/doctor/contacts
+match_score:  float
 ```
+
+Имплементация: при появлении ветки `concern_ref` в рантайме — расширить Pydantic `SourceRouteResult` в `contracts/source_route_result.py` в том же PR, что подключает чтение `concern_ref` из каталога.
 
 ### 1.4 `RetrievalCandidate` (элемент массива из A4)
 
@@ -216,9 +219,19 @@ turn → A1 hard_gates → A2 resolver → A3 source_routing
 
 #### A3.2 Price Lookup
 
-После A3.1 — если `service_id` определён И есть `price_key` → ответ из `prices.json`, формат через шаблон в A6, не через LLM-генерацию (число подставляется как есть).
+Маршрутизация после матча услуги в каталоге (и/или объединения с fallback из сессии) — пять детерминированных веток:
 
-**Меняем:** существующий `select_price_service_route` остаётся.
+| Ветка | Условие | Действие |
+|---|---|---|
+| **A3.2.1** | В каталоге/`prices.json` есть **`price_item`** для услуги | `build_price_lookup_payload` → ответ из шаблона с **конкретной цифрой** (A6), без LLM-генерации числа |
+| **A3.2.2** | `price_item` нет, в каталоге задан **`price_ref`** (специализированный md) | `get_chunk_by_ref(price_ref)` → **LLM** генерирует ответ только из этого чанка |
+| **A3.2.3** | `price_item` нет и **`price_ref` нет** | **`DEFAULT_PRICE_FALLBACK_REF`** = `clinic__info__payment_terms.md#korotko` → `get_chunk_by_ref` + в промпт для генератора добавляется **price-aware инструкция**: сначала признать отсутствие точной цены на услугу, затем кратко пересказать условия оплаты из материала; **не выдумывать цифры** |
+| **A3.2.4** | `route_intent = price_concern` и в каталоге есть **`concern_ref`** | `get_chunk_by_ref(concern_ref)` → LLM из чанка (см. `concern_ref` в §1.3) |
+| **A3.2.5** | Сервис в каталоге не найден (или нужно уточнение перед ценой) | `build_price_clarify_payload` — минимальный детерминированный шаблон без галлюцинации цен |
+
+**Меняем:** существующий `select_price_service_route` + точка вызова в оркестраторе; реализация **A3.2.3** может предшествовать полному модулю `source_routing.py` (см. уже закрытый PR #1.2.7) — при вводе A3 свести с единым `SourceRouteResult`.
+
+**Примечание:** `session.last_service_id` используется как fallback для коротких multi-turn («А сколько стоит?») до полного контрактного закрепления в PR Phase 1 (см. `KNOWN_DEBT.md`).
 
 #### A3.3 Doctors Lookup
 
