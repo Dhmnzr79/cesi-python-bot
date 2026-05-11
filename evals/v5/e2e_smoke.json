@@ -344,7 +344,7 @@
       "must_contain": ["гарант"],
       "must_not_contain": ["могу коротко подсказать", "что для вас важнее", "выбрать направление"],
       "expected_route": "retrieval_chunk",
-      "comment": "Строго content через retrieval_chunk; FAIL с guided до PR #1.7 — known failure, не расширять ожидания.",
+      "comment": "Короткий вопрос про гарантию: ожидается content (retrieval_chunk в smoke по meta.file); A5 Arbiter выбирает источник при 2+ кандидатах.",
       "coverage_class": "STRONG"
     },
     {

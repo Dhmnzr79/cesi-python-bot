@@ -38,20 +38,8 @@ from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
 from resolver import maybe_start_shadow_resolver, resolve_with_fallback
-from arbiter import (
-    arbitrate_among_candidates,
-    build_compact_content_candidates,
-    canonical_ref,
-    compute_agrees_with_legacy,
-    is_arbiter_shadow_enabled,
-    legacy_content_ref_from_route,
-)
-from content_arbiter import (
-    ContentCandidates,
-    ContentRouteResult,
-    collect_content_candidates,
-    select_content_route,
-)
+from arbiter import decide_content_route
+from content_arbiter import ContentCandidates, collect_content_candidates
 from query_selector import (
     DEFAULT_PRICE_FALLBACK_REF,
     compute_retrieval_scope_with_conflict_guard,
@@ -743,130 +731,6 @@ def _slim_content_arbiter_details(details: dict) -> dict:
     return out
 
 
-def _emit_arbiter_shadow_decision(
-    *,
-    q: str,
-    client_id: str | None,
-    cands: ContentCandidates,
-    sel: ContentRouteResult,
-    decision,
-) -> None:
-    """A5 Arbiter shadow: логирует выбор LLM рядом с legacy content_arbiter; ответ не меняет."""
-    try:
-        if not is_arbiter_shadow_enabled():
-            legacy_route = str(sel.selected_route or "")
-            legacy_ref = legacy_content_ref_from_route(
-                sel_route=legacy_route,
-                sel_chunk=sel.selected_chunk if isinstance(sel.selected_chunk, dict) else None,
-                catalog_snapshot=cands.catalog if isinstance(cands.catalog, dict) else None,
-            )
-            compact_off = build_compact_content_candidates(cands, client_id=client_id)
-            request.ctx["arbiter_shadow_status"] = "skipped"
-            request.ctx["arbiter_shadow_selected_ref"] = None
-            request.ctx["arbiter_shadow_confidence"] = None
-            request.ctx["arbiter_shadow_agrees_with_legacy"] = None
-            emit_bot_event(
-                logger,
-                "arbiter_shadow_decision",
-                status="skipped",
-                details={
-                    "legacy_route": legacy_route,
-                    "legacy_ref": legacy_ref,
-                    "arbiter_selected_ref": None,
-                    "arbiter_confidence": None,
-                    "arbiter_reason": None,
-                    "arbiter_alternative": None,
-                    "agrees_with_legacy": None,
-                    "candidate_count": len(compact_off),
-                    "candidate_refs": [x.get("ref") for x in compact_off],
-                    "error": "shadow_disabled",
-                },
-            )
-            return
-        compact = build_compact_content_candidates(cands, client_id=client_id)
-        distinct = {canonical_ref(str(x.get("ref") or "")) for x in compact if str(x.get("ref") or "").strip()}
-        legacy_route = str(sel.selected_route or "")
-        legacy_ref = legacy_content_ref_from_route(
-            sel_route=legacy_route,
-            sel_chunk=sel.selected_chunk if isinstance(sel.selected_chunk, dict) else None,
-            catalog_snapshot=cands.catalog if isinstance(cands.catalog, dict) else None,
-        )
-        if len(distinct) < 2:
-            request.ctx["arbiter_shadow_status"] = "skipped"
-            request.ctx["arbiter_shadow_selected_ref"] = None
-            request.ctx["arbiter_shadow_confidence"] = None
-            request.ctx["arbiter_shadow_agrees_with_legacy"] = None
-            emit_bot_event(
-                logger,
-                "arbiter_shadow_decision",
-                status="skipped",
-                details={
-                    "legacy_route": legacy_route,
-                    "legacy_ref": legacy_ref,
-                    "arbiter_selected_ref": None,
-                    "arbiter_confidence": None,
-                    "arbiter_reason": None,
-                    "arbiter_alternative": None,
-                    "agrees_with_legacy": None,
-                    "candidate_count": len(compact),
-                    "candidate_refs": [x.get("ref") for x in compact],
-                    "error": "less_than_two_distinct_refs",
-                },
-            )
-            return
-        arb_dec, run_status, err = arbitrate_among_candidates(
-            question=q,
-            candidates=compact,
-            decision_frame=decision,
-            call_type="v5_arbiter_shadow",
-        )
-        agrees = compute_agrees_with_legacy(arb_dec.selected_ref if arb_dec else None, legacy_ref)
-        emit_bot_event(
-            logger,
-            "arbiter_shadow_decision",
-            status=run_status,
-            details={
-                "legacy_route": legacy_route,
-                "legacy_ref": legacy_ref,
-                "arbiter_selected_ref": arb_dec.selected_ref if arb_dec else None,
-                "arbiter_confidence": arb_dec.confidence if arb_dec else None,
-                "arbiter_reason": arb_dec.reason if arb_dec else None,
-                "arbiter_alternative": arb_dec.alternative if arb_dec else None,
-                "agrees_with_legacy": agrees,
-                "candidate_count": len(compact),
-                "candidate_refs": [x.get("ref") for x in compact],
-                "error": err,
-            },
-        )
-        request.ctx["arbiter_shadow_status"] = run_status
-        request.ctx["arbiter_shadow_selected_ref"] = arb_dec.selected_ref if arb_dec else None
-        request.ctx["arbiter_shadow_confidence"] = round(float(arb_dec.confidence), 4) if arb_dec else None
-        request.ctx["arbiter_shadow_agrees_with_legacy"] = agrees
-    except Exception as ex:
-        log_json(logger, "arbiter_shadow_exception", err=str(ex)[:500])
-        request.ctx["arbiter_shadow_status"] = "error"
-        request.ctx["arbiter_shadow_selected_ref"] = None
-        request.ctx["arbiter_shadow_confidence"] = None
-        request.ctx["arbiter_shadow_agrees_with_legacy"] = None
-        emit_bot_event(
-            logger,
-            "arbiter_shadow_decision",
-            status="error",
-            details={
-                "legacy_route": str(sel.selected_route or ""),
-                "legacy_ref": None,
-                "arbiter_selected_ref": None,
-                "arbiter_confidence": None,
-                "arbiter_reason": None,
-                "arbiter_alternative": None,
-                "agrees_with_legacy": None,
-                "candidate_count": 0,
-                "candidate_refs": [],
-                "error": str(ex)[:500],
-            },
-        )
-
-
 def finalize_ask(
     payload: dict,
     sid: str,
@@ -1515,6 +1379,39 @@ def _orchestrate_ask_turn(data: dict):
                 q=q, sid=sid, client_id=client_id, price_route=price_route, decision=decision
             )
     if intent == 'content' or md_catalog_priority_ref:
+        # Resolver: неясный запрос — не гоняем A4/A5 shortcut на один случайный chunk (см. smoke_noise_unclear_short).
+        if (
+            decision is not None
+            and not resolver_bypassed_env
+            and str(decision.route_intent or '').strip().lower() == 'unknown'
+            and bool(decision.needs_clarification)
+            and intent == 'content'
+            and not md_catalog_priority_ref
+        ):
+            guided = _service_payload(
+                'Понял. Могу коротко подсказать и помочь выбрать направление — что для вас важнее?',
+                sid,
+                client_id,
+                quick_replies=[
+                    {'label': 'Стоимость', 'ref': 'implantation__pricing__implants.md#korotko'},
+                    {'label': 'Больно ли', 'ref': 'implantation__faq__pain.md#korotko'},
+                    {'label': 'Сроки', 'ref': 'implantation__faq__duration.md#korotko'},
+                    {'label': 'Подходит ли мне', 'ref': 'implantation__info__contraindications.md#korotko'},
+                    {'label': 'Записаться', 'ref': 'clinic__info__consultation.md#korotko'},
+                ],
+                cta={'text': 'Записаться', 'action': 'lead'},
+            )
+            return AskOrchestrationResult(
+                kind='service_reply',
+                q=q,
+                sid=sid,
+                client_id=client_id,
+                service_payload=guided,
+                service_doc_id=None,
+                service_track_user=True,
+                service_route='guided',
+                decision_frame=_orch_decision_dump(decision),
+            )
         effective_scope_topic = _apply_content_retrieval_scope_ctx(
             scope_topic_candidate,
             q,
@@ -1532,9 +1429,44 @@ def _orchestrate_ask_turn(data: dict):
         rdbg_turn = (cands.retrieval or {}).get('debug_meta') or {}
         if rdbg_turn.get('scope_widen_fallback'):
             request.ctx['retrieval_scope_widen_fallback'] = True
-        sel = select_content_route(q=q, sid=sid, client_id=client_id, candidates=cands)
-        emit_bot_event(logger, 'content_arbiter_selected', status='ok', details=_slim_content_arbiter_details({'selected_kind': sel.kind, 'selected_route': sel.selected_route, 'selected_doc_id': sel.selected_doc_id, 'reason': sel.reason, 'debug_meta': sel.debug_meta, 'candidates': sel.candidates, 'rejected_candidates': sel.rejected_candidates}))
-        _emit_arbiter_shadow_decision(q=q, client_id=client_id, cands=cands, sel=sel, decision=decision)
+        sel = decide_content_route(
+            q=q,
+            sid=sid,
+            client_id=client_id,
+            candidates=cands,
+            decision_frame=decision,
+        )
+        dm_sel = sel.debug_meta if isinstance(sel.debug_meta, dict) else {}
+        request.ctx["arbiter_status"] = dm_sel.get("arbiter_status")
+        request.ctx["arbiter_selected_ref"] = dm_sel.get("arbiter_selected_ref")
+        request.ctx["arbiter_confidence"] = dm_sel.get("arbiter_confidence")
+        request.ctx["arbiter_reason"] = dm_sel.get("arbiter_reason")
+        request.ctx["arbiter_candidate_count"] = dm_sel.get("candidate_count")
+        emit_bot_event(
+            logger,
+            "content_arbiter_selected",
+            status="ok",
+            details=_slim_content_arbiter_details(
+                {
+                    "selected_kind": sel.kind,
+                    "selected_route": sel.selected_route,
+                    "selected_doc_id": sel.selected_doc_id,
+                    "reason": sel.reason,
+                    "selected_by": dm_sel.get("selected_by"),
+                    "arbiter_status": dm_sel.get("arbiter_status"),
+                    "arbiter_selected_ref": dm_sel.get("arbiter_selected_ref"),
+                    "arbiter_confidence": dm_sel.get("arbiter_confidence"),
+                    "arbiter_reason": dm_sel.get("arbiter_reason"),
+                    "arbiter_alternative": dm_sel.get("arbiter_alternative"),
+                    "candidate_count": dm_sel.get("candidate_count"),
+                    "candidate_refs": dm_sel.get("candidate_refs"),
+                    "min_confidence": dm_sel.get("min_confidence"),
+                    "debug_meta": sel.debug_meta,
+                    "candidates": sel.candidates,
+                    "rejected_candidates": sel.rejected_candidates,
+                }
+            ),
+        )
         if sel.selected_route == 'catalog_md_first':
             cat = cands.catalog
             sid_svc = str(cat.get('matched_service_id') or '')

@@ -1,6 +1,6 @@
 """A5 Arbiter — выбор лучшего content-источника (structured ArbiterDecision).
 
-PR #1.6: shadow-only в /ask; legacy `select_content_route` остаётся единственным маршрутом ответа.
+PR #1.7: `decide_content_route` — единственный runtime route-decider для content (без legacy if-rules).
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ from pydantic import ValidationError
 
 from contracts.arbiter_decision import ArbiterDecision
 from contracts.decision_frame import DecisionFrame
-from content_arbiter import ContentCandidates
+from content_arbiter import ContentCandidates, ContentRouteResult
 from config import CHAT_MODEL
+from core.routing_loader import THRESHOLDS
 from llm import client
 from retriever import get_chunk_by_ref
 from logging_setup import get_logger, log_llm_error, log_llm_usage
@@ -25,12 +26,7 @@ _MODEL = (os.getenv("MODEL_ARBITER") or "").strip() or CHAT_MODEL
 _TIMEOUT_SEC = float(os.getenv("V5_ARBITER_TIMEOUT_SEC", "12"))
 
 ArbiterRunStatus = Literal["ok", "skipped", "error", "fallback"]
-ArbiterCallType = Literal["v5_arbiter", "v5_arbiter_shadow"]
-
-
-def is_arbiter_shadow_enabled() -> bool:
-    """Телеметрия shadow Arbiter в /ask. По умолчанию включено; V5_ARBITER_SHADOW_ON=0 — без LLM."""
-    return (os.getenv("V5_ARBITER_SHADOW_ON") or "1").strip().lower() in ("1", "true", "yes")
+ArbiterCallType = Literal["v5_arbiter"]
 
 
 def with_default_anchor(md_entry_ref: str) -> str:
@@ -235,6 +231,309 @@ def build_compact_content_candidates(
     return merged
 
 
+def _doc_id_from_chunk(ch: dict) -> str | None:
+    file = os.path.basename(str(ch.get("file") or ""))
+    return os.path.splitext(file)[0] if file else None
+
+
+def _candidate_bundle(candidates: ContentCandidates) -> dict[str, Any]:
+    ret = candidates.retrieval if isinstance(candidates.retrieval, dict) else {}
+    cat = candidates.catalog if isinstance(candidates.catalog, dict) else {}
+    alias = candidates.alias if isinstance(candidates.alias, dict) else {}
+    return {
+        "retrieval_candidate": ret,
+        "catalog_candidate": cat,
+        "alias_candidate": alias,
+        "session_context_candidate": candidates.session,
+    }
+
+
+def _materialize_compact_row(
+    *,
+    row: dict[str, Any],
+    cands: ContentCandidates,
+    client_id: str | None,
+) -> tuple[str, str | None, dict | None] | None:
+    """Map one compact row to (selected_route, selected_doc_id, selected_chunk). None if not materializable."""
+    sk = str(row.get("source_kind") or "").strip().lower()
+    ref = str(row.get("ref") or "").strip()
+    if not ref:
+        return None
+    want = canonical_ref(ref)
+
+    ret = cands.retrieval if isinstance(cands.retrieval, dict) else {}
+    cat = cands.catalog if isinstance(cands.catalog, dict) else {}
+    alias = cands.alias if isinstance(cands.alias, dict) else {}
+
+    if sk == "retrieval":
+        ch = ret.get("chunk") if isinstance(ret.get("chunk"), dict) else None
+        if not isinstance(ch, dict):
+            return None
+        rr = ref_from_chunk(ch)
+        if not rr or canonical_ref(rr) != want:
+            return None
+        return ("retrieval_chunk", _doc_id_from_chunk(ch), ch)
+
+    if sk == "alias":
+        ch = alias.get("leader_chunk") if isinstance(alias.get("leader_chunk"), dict) else None
+        if not isinstance(ch, dict):
+            return None
+        rr = ref_from_chunk(ch)
+        if not rr or canonical_ref(rr) != want:
+            return None
+        return ("retrieval_chunk", _doc_id_from_chunk(ch), ch)
+
+    if sk == "catalog":
+        md_ref = with_default_anchor(str(cat.get("md_entry_ref") or ""))
+        if not md_ref or canonical_ref(md_ref) != want:
+            return None
+        left = md_ref.split("#", 1)[0].strip()
+        base = os.path.basename(left)
+        doc_id = base[:-3] if base.lower().endswith(".md") else base or None
+        return ("catalog_md_first", doc_id or None, None)
+
+    if sk == "session":
+        ch = get_chunk_by_ref(ref, client_id=client_id)
+        if not isinstance(ch, dict):
+            return None
+        rr = ref_from_chunk(ch)
+        if not rr or canonical_ref(rr) != want:
+            return None
+        return ("retrieval_chunk", _doc_id_from_chunk(ch), ch)
+
+    return None
+
+
+def _row_for_selected_ref(compact: list[dict[str, Any]], selected_ref: str) -> dict[str, Any] | None:
+    w = canonical_ref(selected_ref)
+    for row in compact:
+        if not isinstance(row, dict):
+            continue
+        r = str(row.get("ref") or "").strip()
+        if r and canonical_ref(r) == w:
+            return row
+    return None
+
+
+def decide_content_route(
+    *,
+    q: str,
+    sid: str,
+    client_id: str | None,
+    candidates: ContentCandidates,
+    decision_frame: DecisionFrame | dict[str, Any] | None = None,
+) -> ContentRouteResult:
+    """A5 ON: 0 compact → guided (или catalog_facts); 1 → shortcut; 2+ → LLM Arbiter."""
+    _ = sid
+    compact = build_compact_content_candidates(candidates, client_id=client_id)
+    bundle = _candidate_bundle(candidates)
+    base_debug = dict(candidates.debug_meta) if isinstance(candidates.debug_meta, dict) else {}
+    cat = candidates.catalog if isinstance(candidates.catalog, dict) else {}
+    cat_mode = str(cat.get("mode") or "none")
+    min_c = float(THRESHOLDS.arbiter.min_confidence)
+
+    def _refs_list() -> list[str]:
+        return [str(x.get("ref") or "") for x in compact if isinstance(x, dict) and str(x.get("ref") or "").strip()]
+
+    def guided_result(
+        *,
+        reason: str,
+        selected_by: str,
+        trace: dict[str, Any],
+        rejected: list[dict] | None = None,
+    ) -> ContentRouteResult:
+        dm = {**base_debug, "selected_by": selected_by, **trace}
+        return ContentRouteResult(
+            kind="guided",
+            selected_route="guided",
+            selected_doc_id=None,
+            selected_chunk=None,
+            reason=reason,
+            debug_meta=dm,
+            candidates=bundle,
+            rejected_candidates=list(rejected or []),
+        )
+
+    n = len(compact)
+    if n == 0:
+        if cat_mode == "facts":
+            dm = {
+                **base_debug,
+                "selected_by": "catalog_facts",
+                "candidate_count": 0,
+                "candidate_refs": [],
+                "min_confidence": min_c,
+                "arbiter_status": "not_invoked",
+                "arbiter_selected_ref": None,
+                "arbiter_confidence": None,
+                "arbiter_reason": None,
+                "arbiter_alternative": None,
+            }
+            return ContentRouteResult(
+                kind="service",
+                selected_route="catalog_facts",
+                selected_doc_id=None,
+                selected_chunk=None,
+                reason="catalog_facts_no_compact_candidates",
+                debug_meta=dm,
+                candidates=bundle,
+                rejected_candidates=[],
+            )
+        return guided_result(
+            reason="no_content_candidates",
+            selected_by="guided_no_candidates",
+            trace={
+                "candidate_count": 0,
+                "candidate_refs": [],
+                "min_confidence": min_c,
+                "arbiter_status": "not_invoked",
+                "arbiter_selected_ref": None,
+                "arbiter_confidence": None,
+                "arbiter_reason": None,
+                "arbiter_alternative": None,
+            },
+        )
+
+    if n == 1:
+        row = compact[0]
+        if not isinstance(row, dict):
+            return guided_result(
+                reason="selected_ref_unmaterializable",
+                selected_by="guided_selected_ref_unmaterializable",
+                trace={
+                    "candidate_count": 1,
+                    "candidate_refs": _refs_list(),
+                    "min_confidence": min_c,
+                    "arbiter_status": "not_invoked",
+                    "arbiter_selected_ref": None,
+                    "arbiter_confidence": None,
+                    "arbiter_reason": None,
+                    "arbiter_alternative": None,
+                },
+            )
+        cr = _refs_list()
+        trace_one = {
+            "candidate_count": 1,
+            "candidate_refs": cr,
+            "min_confidence": min_c,
+            "arbiter_status": "not_invoked",
+            "arbiter_selected_ref": cr[0] if cr else None,
+            "arbiter_confidence": None,
+            "arbiter_reason": None,
+            "arbiter_alternative": None,
+        }
+        mat = _materialize_compact_row(row=row, cands=candidates, client_id=client_id)
+        if mat is None:
+            return guided_result(
+                reason="selected_ref_unmaterializable",
+                selected_by="guided_selected_ref_unmaterializable",
+                trace=trace_one,
+            )
+        route, doc_id, chunk = mat
+        dm = {**base_debug, "selected_by": "shortcut_single_candidate", **trace_one}
+        return ContentRouteResult(
+            kind="chunk",
+            selected_route=route,
+            selected_doc_id=doc_id,
+            selected_chunk=chunk,
+            reason="shortcut_single_candidate",
+            debug_meta=dm,
+            candidates=bundle,
+            rejected_candidates=[],
+        )
+
+    arb_dec, run_status, err = arbitrate_among_candidates(
+        question=q,
+        candidates=compact,
+        decision_frame=decision_frame,
+        call_type="v5_arbiter",
+    )
+    refs = _refs_list()
+    trace_head = {
+        "candidate_count": n,
+        "candidate_refs": refs,
+        "min_confidence": min_c,
+    }
+
+    if str(run_status or "") != "ok":
+        return guided_result(
+            reason=str(err or run_status or "arbiter_not_ok"),
+            selected_by="guided_arbiter_fallback",
+            trace={
+                **trace_head,
+                "arbiter_status": str(run_status or ""),
+                "arbiter_selected_ref": None,
+                "arbiter_confidence": None,
+                "arbiter_reason": (err or str(run_status or ""))[:800],
+                "arbiter_alternative": None,
+            },
+        )
+
+    assert arb_dec is not None
+    trace_ok = {
+        **trace_head,
+        "arbiter_status": "ok",
+        "arbiter_selected_ref": arb_dec.selected_ref,
+        "arbiter_confidence": float(arb_dec.confidence),
+        "arbiter_reason": arb_dec.reason,
+        "arbiter_alternative": arb_dec.alternative,
+    }
+
+    if float(arb_dec.confidence) < min_c:
+        dm = {**base_debug, "selected_by": "guided_low_confidence", **trace_ok}
+        return ContentRouteResult(
+            kind="guided",
+            selected_route="guided",
+            selected_doc_id=None,
+            selected_chunk=None,
+            reason="arbiter_below_min_confidence",
+            debug_meta=dm,
+            candidates=bundle,
+            rejected_candidates=[],
+        )
+
+    row = _row_for_selected_ref(compact, arb_dec.selected_ref)
+    if row is None:
+        dm = {**base_debug, "selected_by": "guided_selected_ref_unmaterializable", **trace_ok}
+        return ContentRouteResult(
+            kind="guided",
+            selected_route="guided",
+            selected_doc_id=None,
+            selected_chunk=None,
+            reason="selected_ref_unmaterializable",
+            debug_meta=dm,
+            candidates=bundle,
+            rejected_candidates=[],
+        )
+
+    mat = _materialize_compact_row(row=row, cands=candidates, client_id=client_id)
+    if mat is None:
+        dm = {**base_debug, "selected_by": "guided_selected_ref_unmaterializable", **trace_ok}
+        return ContentRouteResult(
+            kind="guided",
+            selected_route="guided",
+            selected_doc_id=None,
+            selected_chunk=None,
+            reason="selected_ref_unmaterializable",
+            debug_meta=dm,
+            candidates=bundle,
+            rejected_candidates=[],
+        )
+
+    route, doc_id, chunk = mat
+    dm = {**base_debug, "selected_by": "v5_arbiter_on", **trace_ok}
+    return ContentRouteResult(
+        kind="chunk",
+        selected_route=route,
+        selected_doc_id=doc_id,
+        selected_chunk=chunk,
+        reason="v5_arbiter_selected",
+        debug_meta=dm,
+        candidates=bundle,
+        rejected_candidates=[],
+    )
+
+
 def _fallback_from_candidates(candidates: list[dict[str, Any]]) -> ArbiterDecision:
     if not candidates:
         return ArbiterDecision(
@@ -401,23 +700,3 @@ def arbitrate_among_candidates(
     except Exception as e:
         log_llm_error(logger, call_type=call_type, err=str(e), model=_MODEL)
         return _fallback_from_candidates(cands), "fallback", str(e)[:500]
-
-
-def compute_agrees_with_legacy(arbiter_ref: str | None, legacy_ref: str | None) -> bool | None:
-    if not arbiter_ref or not legacy_ref:
-        return None
-    return canonical_ref(arbiter_ref) == canonical_ref(legacy_ref)
-
-
-def legacy_content_ref_from_route(
-    *,
-    sel_route: str,
-    sel_chunk: dict | None,
-    catalog_snapshot: dict[str, Any] | None,
-) -> str | None:
-    """Определить ref выбранного legacy-маршрута (если применимо)."""
-    if sel_route == "catalog_md_first" and isinstance(catalog_snapshot, dict):
-        return with_default_anchor(str(catalog_snapshot.get("md_entry_ref") or "")) or None
-    if sel_route == "retrieval_chunk" and isinstance(sel_chunk, dict):
-        return ref_from_chunk(sel_chunk)
-    return None
