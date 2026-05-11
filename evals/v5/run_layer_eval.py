@@ -132,10 +132,129 @@ def eval_resolver() -> EvalResult:
 
 def eval_arbiter() -> EvalResult:
     cases = _load_json(_here("arbiter_golden.json"))
+    try:
+        from arbiter import arbitrate_among_candidates, canonical_ref
+    except Exception as e:
+        return EvalResult(
+            layer="arbiter",
+            status="SKIP",
+            details={"cases": len(cases), "reason": f"arbiter_import_failed: {str(e)[:200]}"},
+        )
+
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return EvalResult(
+            layer="arbiter",
+            status="SKIP",
+            details={"cases": len(cases), "reason": "no_openai_api_key"},
+        )
+
+    total = 0
+    strict_ok = 0
+    status_counts: dict[str, int] = {"ok": 0, "fallback": 0, "skipped": 0, "error": 0}
+    bad: list[dict[str, Any]] = []
+
+    for row in cases:
+        cid = str(row.get("id") or "")
+        q = str(row.get("question") or "")
+        exp = row.get("expected") or {}
+        raw_cands = row.get("candidates")
+        if not isinstance(exp, dict) or not q.strip() or not isinstance(raw_cands, list):
+            continue
+        want_ref = canonical_ref(str(exp.get("selected_ref") or ""))
+        if not want_ref or want_ref == canonical_ref(""):
+            continue
+
+        cands: list[dict[str, Any]] = []
+        for c in raw_cands:
+            if not isinstance(c, dict):
+                continue
+            ref = str(c.get("ref") or "").strip()
+            if not ref:
+                continue
+            entry: dict[str, Any] = {
+                "ref": ref,
+                "source_kind": str(c.get("source_kind") or "eval_golden"),
+                "doc_type": c.get("doc_type"),
+                "subtype": c.get("subtype"),
+                "topic": c.get("topic"),
+                "service_id": c.get("service_id"),
+                "snippet": c.get("snippet"),
+                "why": c.get("why"),
+            }
+            if "score" in c and c.get("score") is not None:
+                entry["score"] = c.get("score")
+            else:
+                entry["score"] = 0.5
+            cands.append(entry)
+        distinct = {canonical_ref(str(c.get("ref") or "")) for c in cands if str(c.get("ref") or "").strip()}
+        if len(distinct) < 2:
+            bad.append({"id": cid, "error": "golden_needs_two_distinct_refs", "question": q[:120]})
+            continue
+
+        total += 1
+        try:
+            decision, run_status, err = arbitrate_among_candidates(
+                question=q,
+                candidates=cands,
+                decision_frame=None,
+                call_type="v5_arbiter",
+            )
+        except Exception as e:
+            status_counts["error"] += 1
+            bad.append({"id": cid, "error": f"call_failed: {str(e)[:200]}", "question": q[:120]})
+            continue
+
+        if decision is None:
+            rs = str(run_status or "skipped")
+            if rs in status_counts:
+                status_counts[rs] += 1
+            else:
+                status_counts["skipped"] += 1
+            bad.append({"id": cid, "error": f"no_decision:{run_status}", "question": q[:120]})
+            continue
+
+        rs = str(run_status or "")
+        if rs in status_counts:
+            status_counts[rs] += 1
+        else:
+            status_counts["error"] += 1
+
+        got_ref = canonical_ref(decision.selected_ref)
+        ref_match = got_ref == want_ref
+        strict_pass = rs == "ok" and ref_match
+        if strict_pass:
+            strict_ok += 1
+        else:
+            bad.append(
+                {
+                    "id": cid,
+                    "question": q[:120],
+                    "expected": want_ref,
+                    "got": got_ref,
+                    "run_status": rs,
+                    "ref_match": ref_match,
+                    "reason": (decision.reason or "")[:200],
+                    "error": err,
+                }
+            )
+
+    if total == 0:
+        return EvalResult(layer="arbiter", status="SKIP", details={"cases": 0, "reason": "no_cases"})
+
+    acc = strict_ok / total
+    status: Literal["OK", "FAIL"] = "OK" if acc >= 0.85 else "FAIL"
     return EvalResult(
         layer="arbiter",
-        status="SKIP",
-        details={"cases": len(cases), "reason": "arbiter_not_implemented_yet"},
+        status=status,
+        details={
+            "cases": total,
+            "strict_ok": strict_ok,
+            "accuracy": round(acc, 4),
+            "accuracy_note": "PASS only if run_status==ok and selected_ref matches; fallback/skipped/error are never passes",
+            "status_counts": dict(status_counts),
+            "bad_examples": bad[:25],
+        },
     )
 
 
