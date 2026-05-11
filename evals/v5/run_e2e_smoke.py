@@ -82,6 +82,16 @@ def _infer_route_from_response(resp: dict[str, Any]) -> str:
         meta = {}
     quick_replies = resp.get("quick_replies") or []
 
+    orch = str(meta.get("orch_route") or "").strip().lower()
+    if orch == "price_lookup":
+        return "price_lookup"
+    if orch == "doctors_list":
+        return "doctors_list"
+    if orch == "contacts_chunk":
+        return "contacts_chunk"
+    if orch == "price_concern":
+        return "price_concern"
+
     # Explicit meta flags first.
     if bool(meta.get("handoff_filter")):
         return "handoff_filter"

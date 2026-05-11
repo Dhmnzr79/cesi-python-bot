@@ -163,7 +163,7 @@
       "question": "Сколько длится приживление импланта?",
       "expected_route": "retrieval_chunk",
       "must_contain": [],
-      "comment": "content_implantation (duration)",
+      "comment": "content_implantation (duration); маршрут для вопросов о сроках/приживлении без doctors_list (PR cleanup).",
       "coverage_class": "WEAK"
     },
     {
@@ -190,6 +190,32 @@
       "comment": "content_implantation (contraindications)",
       "coverage_class": "STRONG"
     },
+    {
+      "id": "smoke_content_impl_process_with_doctor_word",
+      "question": "Как врач ставит имплант?",
+      "expected_route": "retrieval_chunk",
+      "must_contain": [],
+      "must_not_contain": ["моисеев", "бояршин", "ларин", "хан"],
+      "comment": "процесс/техника, не doctors_lookup; имена из md не должны попадать в ответ.",
+      "coverage_class": "STRONG"
+    },
+
+    {
+      "id": "smoke_doctors_who_classic_implant",
+      "question": "Кто делает классическую имплантацию?",
+      "expected_route_any": ["doctors_list", "retrieval_chunk"],
+      "must_contain": [],
+      "comment": "doctor-only: список или один чанк; не price_lookup; маршруты из meta.orch_route (run_e2e_smoke._infer_route_from_response).",
+      "coverage_class": "WEAK"
+    },
+    {
+      "id": "smoke_doctors_moiseev_profile",
+      "question": "Расскажите про Моисеева",
+      "expected_route": "retrieval_chunk",
+      "must_contain": ["моисе"],
+      "comment": "doctor-only: профиль врача; не отдельного route name doctor в раннере нет.",
+      "coverage_class": "WEAK"
+    },
 
     {
       "id": "smoke_cross_topic_extraction",
@@ -204,7 +230,7 @@
       "question": "Сколько стоят виниры?",
       "expected_route_any": ["price_lookup", "retrieval_chunk"],
       "must_contain": ["стоим"],
-      "comment": "veneers: после PR #1.2.7 ответ из payment_terms.md — e2e видит retrieval_chunk (файл без __pricing__). Смысл тот же: ценовой ответ без цифры из prices.json.",
+      "comment": "veneers: цена или честное объяснение без выдуманных цифр; без doctors_list (цена не смешиваем со списком врачей).",
       "coverage_class": "STRONG"
     },
     {
@@ -213,7 +239,7 @@
       "must_contain": ["уточн"],
       "must_not_contain": ["3 000 ₽", "8 500 ₽", "25 000 ₽"],
       "expected_route_any": ["price_lookup", "retrieval_chunk"],
-      "comment": "veneers нет в prices.json и нет price_ref — default fallback на payment_terms.md. Без выдуманных цифр из других услуг.",
+      "comment": "veneers без чужих цен; без doctors_list. Отдельные doctor-only кейсы — ниже.",
       "coverage_class": "STRONG"
     },
     {
@@ -318,7 +344,7 @@
       "must_contain": ["гарант"],
       "must_not_contain": ["могу коротко подсказать", "что для вас важнее", "выбрать направление"],
       "expected_route": "retrieval_chunk",
-      "comment": "known_v4_failure: короткий вопрос про гарантию → ответ из clinic__info__warranty.md, не guided. v4: content_arbiter broad_ambiguous_guided на 2-token query. Ожидается fix PR #1.7 (LLM Arbiter).",
+      "comment": "Строго content через retrieval_chunk; FAIL с guided до PR #1.7 — known failure, не расширять ожидания.",
       "coverage_class": "STRONG"
     },
     {

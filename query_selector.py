@@ -15,6 +15,7 @@ from config import (
     PRICE_SERVICE_MATCH_STRONG,
 )
 import alias_lexical
+from core.routing_loader import THRESHOLDS
 from llm import classify_price_intent, rewrite_query_for_retrieval
 from session import mem_get
 from policy import contacts_intent, pick_contacts_chunk, pick_prices_chunk, price_intent
@@ -376,6 +377,36 @@ def match_service_from_catalog(q: str, *, client_id: str | None) -> dict:
         "match_score": round(float(best_score), 4),
         "is_confident": bool(best_obj is not None and best_score >= PRICE_SERVICE_MATCH_STRONG),
     }
+
+
+def compute_retrieval_scope_with_conflict_guard(
+    *,
+    scope_topic_candidate: str | None,
+    q: str,
+    client_id: str | None,
+) -> tuple[str | None, str]:
+    """Вернуть эффективный topic scope для retrieval и причину гарда.
+
+    Порядок: containment catalog (как в A3) блокирует scope; затем сильный alias.
+    ``guard_reason``: ``catalog_match`` | ``alias_hit`` | ``none``.
+    """
+    raw = (scope_topic_candidate or "").strip().lower()
+    if not raw or raw == "unknown":
+        return None, "none"
+
+    q0 = (q or "").strip()
+    match = match_service_from_catalog(q0, client_id=client_id)
+    cat_score = float(match.get("match_score") or 0.0)
+    if cat_score >= float(THRESHOLDS.catalog_match.containment_min):
+        return None, "catalog_match"
+
+    q_pol = normalize_retrieval_query(q0) or q0
+    _leader, alias_sc = corpus_alias_leader(q_pol, client_id=client_id)
+    alias_val = float(alias_sc or 0.0)
+    if alias_val >= float(THRESHOLDS.retrieval.alias_scope_guard_min):
+        return None, "alias_hit"
+
+    return raw, "none"
 
 
 def _service_from_session_context(sid: str | None, client_id: str | None) -> dict | None:

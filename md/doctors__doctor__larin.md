@@ -3,10 +3,26 @@ doc_id: doctors__doctor__larin
 topic: doctors
 subtopic: larin
 
+name_full: "Ларин Кирилл Евгеньевич"
+name_short: "Ларин"
+
 aliases:
   - "ларин кирилл евгеньевич"
+  - "ларин кирилл"
   - "ортопед ларин"
   - "врач ларин"
+
+services:
+  - zirconia_crowns
+  - veneers
+  - all_on_4
+  - all_on_6
+  - temporary_teeth
+  - classic
+
+position: "Врач-ортопед"
+
+experience_years: 19
 
 cta_text: "Обсудить на консультации"
 cta_action: lead

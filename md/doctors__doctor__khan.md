@@ -3,10 +3,26 @@ doc_id: doctors__doctor__khan
 topic: doctors
 subtopic: khan
 
+name_full: "Хан Александр Олегович"
+name_short: "Хан"
+
 aliases:
   - "хан александр олегович"
+  - "хан александр"
   - "главный врач хан"
   - "врач хан"
+  - "хирург хан"
+
+services:
+  - classic
+  - one_stage
+  - all_on_4
+  - all_on_6
+  - temporary_teeth
+
+position: "Главный врач стоматологии, хирург-имплантолог"
+
+experience_years: 13
 
 cta_text: "Обсудить на консультации"
 cta_action: lead

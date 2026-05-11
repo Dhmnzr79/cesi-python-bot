@@ -604,6 +604,7 @@ verifier:
 retrieval:
   scope_topic_min_confidence: 0.6  # для включения scope-фильтра
   low_score_threshold: 0.33        # ниже → пустой массив кандидатов
+  alias_scope_guard_min: 0.85      # при alias ≥ этого — не режем корпус по Resolver topic (конфликт-гард)
 
 catalog_match:
   containment_min: 0.88            # для hard route

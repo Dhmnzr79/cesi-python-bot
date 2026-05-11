@@ -46,6 +46,7 @@
 | Session bridge для `service_id` из истории | reverted PR #1.3.1-revert | Отдельная склейка `service_id` по session отменена; fallback остаётся через `session.last_service_id` в ценовом пути до A3 в полном объёме. |
 | Хардкод-шаблон цены в `ux_builder.py` | PR #1.2.7 | Заменён на default `price_ref` → `clinic__info__payment_terms.md#korotko` + price-aware инструкция в `llm_question` (`app.py`). |
 | Multi-turn service_id resolution через session | PR #1.3 | Закреплено в `SourceRouteResult.match_method="session_fallback"` в `source_routing.py` (детерминированно вместо неявного поведения `query_selector`). |
+| Шаблонная склейка doctor cards (обрезка по символам, без LLM) | PR #1.3.6 | Заменено на LLM-компоновку из structured facts `doctors_lookup`. |
 
 ---
 

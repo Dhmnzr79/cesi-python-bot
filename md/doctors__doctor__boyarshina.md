@@ -3,10 +3,22 @@ doc_id: doctors__doctor__boyarshina
 topic: doctors
 subtopic: boyarshina
 
+name_full: "Бояршина Ирина Юрьевна"
+name_short: "Бояршина"
+
 aliases:
-  - "бояршина ирина юрьевна"
+  - "бояршина"
+  - "ирина бояршина"
+  - "доктор бояршина"
   - "стоматолог бояршина"
-  - "врач бояршина"
+
+services:
+  - veneers
+  - zirconia_crowns
+  - teeth_treatment
+position: "Врач-стоматолог-терапевт"
+
+experience_years: 16
 
 cta_text: "Обсудить на консультации"
 cta_action: lead

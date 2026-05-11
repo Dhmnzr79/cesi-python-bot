@@ -3,10 +3,25 @@ doc_id: doctors__doctor__moiseev
 topic: doctors
 subtopic: moiseev
 
+name_full: "Моисеев Кирилл Николаевич"
+name_short: "Моисеев"
+
 aliases:
   - "моисеев кирилл николаевич"
+  - "кирилл моисеев"
   - "имплантолог моисеев"
   - "врач моисеев"
+
+services:
+  - classic
+  - one_stage
+  - all_on_4
+  - all_on_6
+  - temporary_teeth
+
+position: "Врач-имплантолог"
+
+experience_years: 16
 
 cta_text: "Обсудить на консультации"
 cta_action: lead

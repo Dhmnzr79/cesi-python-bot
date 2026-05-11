@@ -14,6 +14,8 @@ verifier:
 retrieval:
   scope_topic_min_confidence: 0.6
   low_score_threshold: 0.33
+  # ниже — игнорировать Resolver topic scope при сильном alias (конфликт-гард PR #1.4)
+  alias_scope_guard_min: 0.85
 
 catalog_match:
   containment_min: 0.88

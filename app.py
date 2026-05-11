@@ -39,9 +39,13 @@ from flow_handlers import handle_flows
 from llm import classify_handoff_filter, classify_intent
 from resolver import maybe_start_shadow_resolver, resolve_with_fallback
 from content_arbiter import collect_content_candidates, select_content_route
-from query_selector import DEFAULT_PRICE_FALLBACK_REF
-from query_selector import select_chunk_for_question
-from query_selector import select_price_service_route
+from query_selector import (
+    DEFAULT_PRICE_FALLBACK_REF,
+    compute_retrieval_scope_with_conflict_guard,
+    select_chunk_for_question,
+    select_price_service_route,
+)
+from doctors_lookup import build_doctors_list_llm_question, build_synthetic_doctors_list_chunk
 from source_routing import route_source, slim_source_route_payload
 from policy import (
     apply_response_policy,
@@ -654,6 +658,22 @@ def _bind_chat_ctx(sid: str, client_id: str) -> None:
     bind_client_id(sid, client_id)
 
 
+def _apply_content_retrieval_scope_ctx(
+    scope_topic_candidate: str | None,
+    q: str,
+    client_id: str,
+) -> str | None:
+    """Пороги и гарды — только через ``compute_retrieval_scope_with_conflict_guard`` (routing.yaml)."""
+    eff, gr = compute_retrieval_scope_with_conflict_guard(
+        scope_topic_candidate=scope_topic_candidate,
+        q=q,
+        client_id=client_id,
+    )
+    request.ctx["retrieval_scope_topic"] = eff
+    request.ctx["retrieval_scope_guard_reason"] = gr
+    return eff
+
+
 def _set_route(route: str | None) -> None:
     if route:
         request.ctx["route"] = str(route).strip()
@@ -782,6 +802,9 @@ def finalize_ask(
                 "resolver_used": bool(request.ctx.get("resolver_used")),
                 "safety_net_used": bool(request.ctx.get("safety_net_used")),
                 "retrieval_scope_topic": request.ctx.get("retrieval_scope_topic"),
+                "retrieval_scope_guard_reason": str(
+                    request.ctx.get("retrieval_scope_guard_reason") or "none"
+                ),
                 "retrieval_scope_widen_fallback": bool(
                     request.ctx.get("retrieval_scope_widen_fallback")
                 ),
@@ -1011,6 +1034,17 @@ def dashboard_events_api():
     return jsonify(payload)
 
 
+def _ru_doctor_count_word(n: int) -> str:
+    n_abs = abs(int(n))
+    n10 = n_abs % 10
+    n100 = n_abs % 100
+    if n10 == 1 and n100 != 11:
+        return "врач"
+    if n10 in (2, 3, 4) and n100 not in (12, 13, 14):
+        return "врача"
+    return "врачей"
+
+
 def _orch_decision_dump(decision):
     """DecisionFrame после Resolver либо None (RESOLVER_OFF / ранний выход)."""
     return decision.model_dump() if decision is not None else None
@@ -1031,6 +1065,7 @@ def _orchestrate_ask_turn(data: dict):
     q, truncated = _normalize_question_text(q_raw)
     _bind_chat_ctx(sid, client_id)
     request.ctx["retrieval_scope_topic"] = None
+    request.ctx["retrieval_scope_guard_reason"] = "none"
     request.ctx["retrieval_scope_widen_fallback"] = False
     request.ctx["legacy_intent"] = None
     request.ctx["effective_intent"] = None
@@ -1127,8 +1162,8 @@ def _orchestrate_ask_turn(data: dict):
         else:
             intent = 'content'
         request.ctx['effective_intent'] = str(intent)
-    # Shadow telemetry only: Resolver topic suggestion for dashboards — не режем корпус до A3 (см. DEPRECATED.md).
-    retrieval_scope = None
+    # Кандидат topic от Resolver — в retrieval подставляем только после A3/guard (PR #1.4).
+    scope_topic_candidate: str | None = None
     if decision is not None:
         st_tp = decision.service_topic
         if (
@@ -1137,16 +1172,20 @@ def _orchestrate_ask_turn(data: dict):
             and float(decision.confidence.topic or 0.0)
             >= float(THRESHOLDS.retrieval.scope_topic_min_confidence)
         ):
-            retrieval_scope = str(st_tp).strip().lower()
-    request.ctx['retrieval_scope_topic'] = retrieval_scope
+            scope_topic_candidate = str(st_tp).strip().lower()
+        # Topic scope мешает кросс-темным и многоэтапным вопросам (см. smoke_cross_topic_extract_and_implant).
+        qm_rs = str(decision.query_mode or "").strip().lower()
+        if qm_rs in ("comparison", "process") and scope_topic_candidate is not None:
+            scope_topic_candidate = None
 
     qp_loc = normalize_retrieval_query(q) or (q or "")
     if intent != 'offtopic' and (
         contacts_intent(qp_loc.strip()) or contacts_intent((q or '').strip())
     ):
         intent = 'contacts'
-        retrieval_scope = None
+        scope_topic_candidate = None
         request.ctx['retrieval_scope_topic'] = None
+        request.ctx['retrieval_scope_guard_reason'] = 'none'
         request.ctx['effective_intent'] = 'contacts'
 
     if intent == 'offtopic':
@@ -1167,20 +1206,61 @@ def _orchestrate_ask_turn(data: dict):
         srd = slim_source_route_payload(sr)
         request.ctx['source_route_decision'] = srd
         emit_bot_event(logger, 'source_route_decision', status='ok', details=srd)
-        if sr.source == 'doctor' and sr.ref:
-            ch = get_chunk_by_ref(sr.ref, client_id=client_id)
-            if ch:
-                return AskOrchestrationResult(
-                    kind='chunk',
-                    q=q,
-                    sid=sid,
-                    client_id=client_id,
-                    chosen_chunk=ch,
-                    llm_question=q or f'Информация о враче ({sr.ref})',
-                    log_event='Answer generated from doctors_lookup',
-                    chunk_route='retrieval_chunk',
-                    decision_frame=_orch_decision_dump(decision),
-                )
+        if sr.source == 'doctor':
+            doc_hit = (sr.payload or {}).get('doctor') if isinstance(sr.payload, dict) else None
+            routing = str(doc_hit.get('routing') or 'doc') if isinstance(doc_hit, dict) else 'doc'
+            if routing == 'cards' and isinstance(doc_hit, dict):
+                cards_raw = doc_hit.get('cards') or []
+                if (
+                    isinstance(cards_raw, list)
+                    and len(cards_raw) >= 2
+                    and isinstance(cards_raw[0], dict)
+                    and cards_raw[0].get('name_full')
+                ):
+                    syn = build_synthetic_doctors_list_chunk(
+                        client_id=client_id, facts=cards_raw
+                    )
+                    llmq_cards = build_doctors_list_llm_question(user_question=q or '')
+                    return AskOrchestrationResult(
+                        kind='chunk',
+                        q=q,
+                        sid=sid,
+                        client_id=client_id,
+                        chosen_chunk=syn,
+                        llm_question=llmq_cards,
+                        log_event='Answer generated from doctors_lookup (LLM list)',
+                        chunk_route='doctors_list',
+                        decision_frame=_orch_decision_dump(decision),
+                    )
+            if sr.ref:
+                ch = get_chunk_by_ref(sr.ref, client_id=client_id)
+                if ch:
+                    llmq = q or f'Информация о враче ({sr.ref})'
+                    if routing == 'overview' and isinstance(doc_hit, dict):
+                        n_tot = doc_hit.get('matching_doctors_total')
+                        if isinstance(n_tot, int) and n_tot >= 4:
+                            w = _ru_doctor_count_word(n_tot)
+                            llmq = (
+                                f'{llmq}\n\nКонтекст: упомяни, что услугу делают ровно {n_tot} {w} '
+                                '(точное число), без перечисления каждого по имени. '
+                                'Предложи записаться на консультацию для подбора врача.'
+                            )
+                        elif n_tot == 0:
+                            llmq = (
+                                f'{llmq}\n\nКонтекст: узких врачей по этому направлению в карточках '
+                                'сейчас нет — ответь по общему обзору клиники из материала.'
+                            )
+                    return AskOrchestrationResult(
+                        kind='chunk',
+                        q=q,
+                        sid=sid,
+                        client_id=client_id,
+                        chosen_chunk=ch,
+                        llm_question=llmq,
+                        log_event='Answer generated from doctors_lookup',
+                        chunk_route='retrieval_chunk',
+                        decision_frame=_orch_decision_dump(decision),
+                    )
         if sr.source == 'catalog_facts' and sr.payload:
             svc = (sr.payload.get('service') or {}) if isinstance(sr.payload, dict) else {}
             sid_svc = str(sr.service_id or sr.payload.get('matched_service_id') or '')
@@ -1298,11 +1378,16 @@ def _orchestrate_ask_turn(data: dict):
                 q=q, sid=sid, client_id=client_id, price_route=price_route, decision=decision
             )
     if intent == 'content' or md_catalog_priority_ref:
+        effective_scope_topic = _apply_content_retrieval_scope_ctx(
+            scope_topic_candidate,
+            q,
+            client_id,
+        )
         cands = collect_content_candidates(
             q=q,
             sid=sid,
             client_id=client_id,
-            scope_topic=None,
+            scope_topic=effective_scope_topic,
             catalog_md_priority_ref=md_catalog_priority_ref,
             catalog_md_priority_service_id=md_catalog_priority_sid,
             catalog_md_priority_match_score=md_catalog_priority_score,
@@ -1376,8 +1461,13 @@ def _orchestrate_ask_turn(data: dict):
             return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=pls, service_doc_id=None, service_track_user=True, service_route='low_score_fallback', decision_frame=_orch_decision_dump(decision))
         return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=no_candidates_response(), service_doc_id=None, service_track_user=True, service_route='error', decision_frame=_orch_decision_dump(decision))
     log_json(logger, 'Processing question', question=q[:100], question_length=len(q))
+    effective_scope_topic = _apply_content_retrieval_scope_ctx(
+        scope_topic_candidate,
+        q,
+        client_id,
+    )
     selection = select_chunk_for_question(
-        q, client_id=client_id, sid=sid, scope_topic=None
+        q, client_id=client_id, sid=sid, scope_topic=effective_scope_topic
     )
     mode = selection.get('mode')
     dmeta = selection.get('debug_meta') or {}
@@ -1473,6 +1563,7 @@ def ask():
                     "latency_ms": None,
                     "fallback_reason": "ask_failed",
                     "retrieval_scope_topic": None,
+                    "retrieval_scope_guard_reason": "none",
                     "retrieval_scope_widen_fallback": False,
                     "legacy_intent": None,
                     "effective_intent": "",
@@ -1622,6 +1713,7 @@ def ask_stream():
                     "latency_ms": None,
                     "fallback_reason": "ask_stream_failed",
                     "retrieval_scope_topic": None,
+                    "retrieval_scope_guard_reason": "none",
                     "retrieval_scope_widen_fallback": False,
                     "legacy_intent": None,
                     "effective_intent": "",

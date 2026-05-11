@@ -8,7 +8,7 @@ from contracts.decision_frame import DecisionFrame
 from contracts.source_route_result import SourceRouteResult, SourceType
 
 from core.routing_loader import THRESHOLDS
-from doctors_lookup import doctor_name_probe, doctors_lookup
+from doctors_lookup import doctor_intent_probe, doctor_name_probe, doctors_lookup
 from query_selector import (
     catalog_service_session_context,
     match_service_from_catalog,
@@ -89,10 +89,21 @@ def route_source(
     ri = _resolve_route_intent(q=q, decision=decision, app_intent=app_intent)
     q0 = (q or "").strip()
 
-    topic_doctors = bool(decision is not None and str(decision.service_topic or "") == "doctors")
-    if topic_doctors or doctor_name_probe(q0):
+    doctors_gate = doctor_name_probe(q0, client_id=client_id) or doctor_intent_probe(q0)
+    if doctors_gate and ri not in ("price_lookup", "price_concern"):
         hit = doctors_lookup(q0, client_id=client_id)
         if hit:
+            routing = str(hit.get("routing") or "doc")
+            if routing == "cards":
+                return SourceRouteResult(
+                    source="doctor",
+                    service_id=None,
+                    ref=None,
+                    concern_ref=None,
+                    payload={"doctor": hit},
+                    match_score=1.0,
+                    match_method="doctors_lookup",
+                )
             did = str(hit.get("doc_id") or "").strip().removesuffix(".md")
             ref = _with_korotko_anchor(f"{did}.md")
             return SourceRouteResult(

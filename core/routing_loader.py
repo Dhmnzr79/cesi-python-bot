@@ -41,6 +41,7 @@ class RetrievalThresholds(BaseModel):
 
     scope_topic_min_confidence: float = Field(..., ge=0.0, le=1.0)
     low_score_threshold: float = Field(..., ge=0.0, le=1.0)
+    alias_scope_guard_min: float = Field(..., ge=0.0, le=1.0)
 
 
 class CatalogMatchThresholds(BaseModel):
