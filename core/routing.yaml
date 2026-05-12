@@ -26,3 +26,23 @@ retrieval:
 catalog_match:
   containment_min: 0.88
 
+# PR #1.10 — corpus alias (exact + build-time alias embeddings + controlled rescue).
+# Runtime source of truth for alias behavior; do not duplicate as 0.x literals in *.py.
+alias:
+  strong_effective_min: 0.82
+  soft_assist_min: 0.72
+  near_exact_score: 0.94
+  near_exact_length_ratio_min: 0.85
+  embedding_high_min: 0.78
+  embedding_strong_cosine_min: 0.82
+  embedding_medium_min: 0.58
+  embedding_medium_max: 0.78
+  embedding_medium_score_cap: 0.76
+  rescue_max_query_chars: 14
+  rescue_max_core_tokens: 4
+  rescue_min_sim: 0.72
+  rescue_margin_min: 0.035
+  rescue_effective_cap: 0.88
+  scope_guard_min: 0.85
+  embed_matrix_top_chunks: 48
+

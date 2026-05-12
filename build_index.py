@@ -35,6 +35,43 @@ EMB_MODEL = os.getenv("MODEL_EMBED", "text-embedding-3-small")
 
 ALIAS_RX = re.compile(r"<!--\s*aliases:\s*\[(.*?)\]\s*-->", re.I|re.S)
 
+
+def _norm_alias_key(s: str) -> str:
+    """Must match retriever._norm_text for alias_norm keys."""
+    s = (s or "").strip().lower()
+    s = re.sub(r"\{#.*?\}", " ", s)
+    s = re.sub(r"[^\w\s\-]", " ", s, flags=re.U)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _heading_plain_build(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"^#{1,6}\s*", "", s)
+    return s
+
+
+def _chunk_alias_terms_build(row: dict) -> list[str]:
+    terms: list[str] = []
+    aliases = row.get("aliases") or []
+    if isinstance(aliases, list):
+        for a in aliases:
+            if isinstance(a, str) and a.strip():
+                terms.append(a.strip())
+    h2 = _heading_plain_build(str(row.get("h2") or ""))
+    h3 = _heading_plain_build(str(row.get("h3") or ""))
+    h2_id = str(row.get("h2_id") or "").strip()
+    h3_id = str(row.get("h3_id") or "").strip()
+    if h2:
+        terms.append(h2)
+    if h3:
+        terms.append(h3)
+    if h2_id:
+        terms.append(h2_id.replace("-", " "))
+    if h3_id:
+        terms.append(h3_id.replace("-", " "))
+    return terms
+
+
 def extract_local_aliases(block_text:str) -> list[str]:
     m = ALIAS_RX.search(block_text or "")
     if not m: 
@@ -130,10 +167,60 @@ def main():
     np.save("data/embeddings.npy", arr)
     with open("data/corpus.jsonl","w",encoding="utf-8") as f:
         for row in corpus: f.write(json.dumps(row, ensure_ascii=False)+"\n")
-    
-    log_json(logger, "Index build completed", 
-             chunks_count=len(corpus), embeddings_shape=arr.shape)
-    print(f"OK: chunks={len(corpus)}  -> data/embeddings.npy, data/corpus.jsonl")
+
+    # --- PR #1.10: build-time alias phrase embeddings (one row per unique (chunk, alias_norm)) ---
+    alias_rows_out: list[dict] = []
+    alias_texts: list[str] = []
+    for i, row in enumerate(corpus):
+        seen_norm: set[str] = set()
+        for raw in _chunk_alias_terms_build(row):
+            t = (raw or "").strip()
+            if not t:
+                continue
+            nk = _norm_alias_key(t)
+            if len(nk) < 2 or nk in seen_norm:
+                continue
+            seen_norm.add(nk)
+            alias_rows_out.append(
+                {
+                    "corpus_idx": int(i),
+                    "client_id": row.get("client_id"),
+                    "file": row.get("file"),
+                    "h2_id": row.get("h2_id") or None,
+                    "h3_id": row.get("h3_id") or None,
+                    "doc_type": row.get("doc_type"),
+                    "subtype": row.get("subtype"),
+                    "alias_norm": nk,
+                    "alias_text": t[:4000],
+                }
+            )
+            alias_texts.append(t[:4000])
+    alias_emb_list: list[np.ndarray] = []
+    if alias_texts:
+        for j in range(0, len(alias_texts), B):
+            alias_emb_list.extend(embed_batch(alias_texts[j : j + B]))
+        a_arr = np.vstack(alias_emb_list).astype(np.float32)
+        a_norms = np.linalg.norm(a_arr, axis=1, keepdims=True) + 1e-9
+        a_arr = a_arr / a_norms
+    else:
+        a_arr = np.zeros((0, int(arr.shape[1])), dtype=np.float32)
+    np.save("data/alias_embeddings.npy", a_arr)
+    with open("data/alias_rows.jsonl", "w", encoding="utf-8") as af:
+        for meta in alias_rows_out:
+            af.write(json.dumps(meta, ensure_ascii=False) + "\n")
+
+    log_json(
+        logger,
+        "Index build completed",
+        chunks_count=len(corpus),
+        embeddings_shape=arr.shape,
+        alias_rows=len(alias_rows_out),
+        alias_embeddings_shape=a_arr.shape,
+    )
+    print(
+        f"OK: chunks={len(corpus)}  -> data/embeddings.npy, data/corpus.jsonl, "
+        f"alias_rows={len(alias_rows_out)} -> data/alias_embeddings.npy, data/alias_rows.jsonl"
+    )
 
 if __name__ == "__main__":
     main()

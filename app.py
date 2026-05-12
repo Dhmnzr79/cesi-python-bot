@@ -16,7 +16,6 @@ import session as session_mod
 from pg_sink import enqueue_v5_turn_trace, init_pg_sink
 
 from config import (
-    ALIAS_STRONG_THRESHOLD,
     ANTI_SPAM_NO_INTENT_TURNS,
     ANTI_SPAM_BURST_MESSAGES,
     ANTI_SPAM_BURST_WINDOW_SEC,
@@ -55,7 +54,7 @@ from policy import (
     pick_contacts_chunk,
 )
 from retriever import (
-    alias_hit_score_for_chunk,
+    alias_debug_score_for_chunk,
     best_alias_hit_in_corpus,
     chunk_info,
     get_chunk_by_ref,
@@ -1827,10 +1826,12 @@ def dbg():
     alias_selected, alias_score = best_alias_hit_in_corpus(
         q_use,
         client_id=client_id,
-        strong_threshold=ALIAS_STRONG_THRESHOLD,
+        strong_threshold=float(THRESHOLDS.alias.strong_effective_min),
     )
     for x in c:
-        x["alias_score"] = alias_hit_score_for_chunk(q_use, x)
+        dbg = alias_debug_score_for_chunk(q_use, x, client_id=client_id)
+        x["alias_score"] = dbg.get("alias_effective")
+        x["alias_debug"] = dbg
         x.pop("text", None)
     alias_summary = None
     if isinstance(alias_selected, dict):

@@ -57,8 +57,7 @@
 | Что | Будет помечено в | Будет удалено в |
 |---|---|---|
 | `content_arbiter.py:select_content_route` (7 if-rules) | — (удаляется сразу) | PR #1.7 |
-| `retriever.py:_alias_hit_score_raw_for_chunk` (12-band) | — (удаляется сразу) | PR #1.10 |
-| `retriever.py:_lemma_alias_channel`, `_trigram_alias_channel` | — (удаляется сразу) | PR #1.10 |
+| `retriever.py` 12-band alias scorer (`_alias_hit_score_raw_for_chunk`, `_lemma_alias_channel`, `_trigram_alias_channel`) | `alias_scorer_legacy_shadow.py` (telemetry only) | после стабилизации shadow |
 | `query_selector.py:_match_score`, `_match_score_lemma` (magic-band) | PR #1.3 | PR #2.1 |
 | `config.py:ALIAS_STRONG_THRESHOLD`, `ALIAS_SOFT_THRESHOLD` | PR #1.10 | PR #2.2 |
 | `config.py:LOW_SCORE_THRESHOLD` | PR #1.4 | PR #2.2 |

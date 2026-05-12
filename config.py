@@ -60,6 +60,8 @@ ANTI_SPAM_BURST_MESSAGES = int(os.getenv("ANTI_SPAM_BURST_MESSAGES", "6"))
 DATA_DIR = os.getenv("DATA_DIR", "data")
 CORPUS_PATH = os.path.join(DATA_DIR, "corpus.jsonl")
 EMB_PATH = os.path.join(DATA_DIR, "embeddings.npy")
+ALIAS_ROWS_PATH = os.path.join(DATA_DIR, "alias_rows.jsonl")
+ALIAS_EMB_PATH = os.path.join(DATA_DIR, "alias_embeddings.npy")
 SQLITE_PATH = os.getenv("SQLITE_PATH", os.path.join(DATA_DIR, "bot.db"))
 
 # --- Retrieval / policy пороги ---

@@ -46,7 +46,15 @@ def _print_result(res: EvalResult) -> None:
         {"layer": res.layer, "status": res.status, "details": res.details},
         ensure_ascii=False,
     )
-    print(line)
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        print(
+            json.dumps(
+                {"layer": res.layer, "status": res.status, "details": res.details},
+                ensure_ascii=True,
+            )
+        )
 
 
 def _norm_expected(v: Any) -> str | None:

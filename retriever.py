@@ -9,20 +9,20 @@ from typing import Any
 import numpy as np
 
 from config import (
+    ALIAS_EMB_PATH,
+    ALIAS_ROWS_PATH,
     BROAD_QUERY_MAX_WORDS,
     CORPUS_PATH,
     EMB_PATH,
     EMB_MODEL,
-    ALIAS_STRONG_THRESHOLD,
     RERANK_MODEL,
     RETRIEVE_CACHE_MAXSIZE,
     RETRIEVE_CACHE_TTL_SEC,
 )
+from core.routing_loader import THRESHOLDS
 from llm import client
 from logging_setup import get_logger, log_json, log_llm_usage
 from meta_loader import get_doc_meta, get_doc_path
-
-import alias_lexical
 
 logger = get_logger("bot")
 
@@ -444,24 +444,6 @@ def _core_tokens(text: str) -> list[str]:
     return out
 
 
-def _strong_core_tokens(core: list[str]) -> list[str]:
-    """«Сильные» токены: длина >= 3 или есть цифры (адрес, сумма)."""
-    return [t for t in core if len(t) >= 3 or any(ch.isdigit() for ch in t)]
-
-
-def _all_tokens_in_text(tokens: list[str], an: str) -> bool:
-    """Каждый токен — отдельное слово в тексте (границы по пробелам)."""
-    if not tokens:
-        return False
-    padded = f" {an} "
-    for t in tokens:
-        if len(t) < 2:
-            return False
-        if f" {t} " not in padded:
-            return False
-    return True
-
-
 def _heading_plain(s: str) -> str:
     s = (s or "").strip()
     s = re.sub(r"^#{1,6}\s*", "", s)
@@ -529,208 +511,217 @@ def _alias_probe_terms(q: str) -> list[str]:
     return out
 
 
-def _alias_hit_score_raw_for_chunk(q: str, ch: dict) -> float:
-    qn = _norm_text(q)
-    if not qn:
-        return 0.0
-    q_core = _core_tokens(q)
-    q_core_joint = " ".join(q_core) if q_core else ""
-    q_tokens = {t for t in qn.split() if len(t) >= 2}
-    q_core_set = {t for t in q_core if len(t) >= 2}
-    best = 0.0
+_ALIAS_EMB_MATRIX: np.ndarray | None = None
+_ALIAS_ROW_CORPUS_IDX: np.ndarray | None = None
+_ALIAS_ROW_CLIENT: list[str] | None = None
+_ALIAS_ARTIFACTS_ERROR: str | None = None
+
+
+def _legacy_shadow_enabled() -> bool:
+    return os.getenv("ALIAS_LEGACY_SHADOW", "1").lower() in ("1", "true", "yes")
+
+
+def _embedding_dim_for_empty_alias_matrix() -> int:
+    try:
+        if os.path.isfile(EMB_PATH):
+            arr = np.load(EMB_PATH)
+            if arr.ndim == 2 and arr.shape[1] > 0:
+                return int(arr.shape[1])
+    except OSError:
+        pass
+    return 1536
+
+
+def _load_alias_embed_artifacts() -> None:
+    global _ALIAS_EMB_MATRIX, _ALIAS_ROW_CORPUS_IDX, _ALIAS_ROW_CLIENT, _ALIAS_ARTIFACTS_ERROR
+    if _ALIAS_EMB_MATRIX is not None:
+        return
+    dim0 = _embedding_dim_for_empty_alias_matrix()
+    try:
+        if not os.path.isfile(ALIAS_EMB_PATH) or not os.path.isfile(ALIAS_ROWS_PATH):
+            _ALIAS_ARTIFACTS_ERROR = "missing_alias_files"
+            _ALIAS_EMB_MATRIX = np.zeros((0, dim0), dtype=np.float32)
+            _ALIAS_ROW_CORPUS_IDX = np.array([], dtype=np.int32)
+            _ALIAS_ROW_CLIENT = []
+            return
+        emb = np.load(ALIAS_EMB_PATH)
+        clients: list[str] = []
+        idxs: list[int] = []
+        with open(ALIAS_ROWS_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                o = json.loads(line)
+                idxs.append(int(o["corpus_idx"]))
+                clients.append(str(o.get("client_id") or ""))
+        if emb.shape[0] != len(idxs):
+            _ALIAS_ARTIFACTS_ERROR = "alias_rows_emb_shape_mismatch"
+            _ALIAS_EMB_MATRIX = np.zeros((0, int(emb.shape[1]) if emb.ndim == 2 else dim0), dtype=np.float32)
+            _ALIAS_ROW_CORPUS_IDX = np.array([], dtype=np.int32)
+            _ALIAS_ROW_CLIENT = []
+            return
+        if emb.shape[0] == 0:
+            _ALIAS_EMB_MATRIX = emb.astype(np.float32)
+            _ALIAS_ROW_CORPUS_IDX = np.array([], dtype=np.int32)
+            _ALIAS_ROW_CLIENT = []
+            return
+        _ALIAS_EMB_MATRIX = emb.astype(np.float32)
+        _ALIAS_ROW_CORPUS_IDX = np.array(idxs, dtype=np.int32)
+        _ALIAS_ROW_CLIENT = clients
+        _ALIAS_ARTIFACTS_ERROR = ""
+    except Exception as e:
+        _ALIAS_ARTIFACTS_ERROR = str(e)
+        _ALIAS_EMB_MATRIX = np.zeros((0, dim0), dtype=np.float32)
+        _ALIAS_ROW_CORPUS_IDX = np.array([], dtype=np.int32)
+        _ALIAS_ROW_CLIENT = []
+
+
+def _chunk_key_tuple(ch: dict) -> tuple[Any, Any, Any]:
+    return (
+        ch.get("file"),
+        ch.get("h2_id") or ch.get("h2"),
+        ch.get("h3_id") or ch.get("h3"),
+    )
+
+
+def _corpus_index_for_chunk(corpus: list, ch: dict) -> int | None:
+    key = _chunk_key_tuple(ch)
+    for i, c0 in enumerate(corpus):
+        if isinstance(c0, dict) and _chunk_key_tuple(c0) == key:
+            return int(i)
+    return None
+
+
+def _deterministic_alias_for_chunk(q_norm: str, ch: dict) -> tuple[float, bool, str]:
+    """Exact / near-exact only. Returns (score, exact_hit, tier_label)."""
+    if not q_norm:
+        return 0.0, False, "none"
+    thr = THRESHOLDS.alias
     for raw in _chunk_alias_terms(ch):
         an = _norm_text(raw)
         if not an or len(an) < 2:
             continue
-        a_core = _core_tokens(raw)
-        a_core_joint = " ".join(a_core) if a_core else ""
-        a_core_set = {t for t in a_core if len(t) >= 2}
-
-        # --- Ядро: подстрока целиком (быстрый путь для «налоговый вычет» vs длинный alias) ---
-        if q_core_joint and len(q_core_joint) >= 4 and q_core_joint in an:
-            best = max(best, 0.92)
-        if a_core_joint and len(a_core_joint) >= 4 and a_core_joint in qn:
-            best = max(best, 0.92)
-
-        # --- Короткое точечное ядро: 2 «сильных» токена запроса оба есть в alias как слова ---
-        strong_q = _strong_core_tokens(q_core)
-        if len(strong_q) == 2 and _all_tokens_in_text(strong_q, an):
-            best = max(best, 0.9)
-        # Два любых токена ядра (после стоп-слов), если ядро ровно из двух слов ---
-        if len(q_core) == 2 and all(len(t) >= 2 for t in q_core) and _all_tokens_in_text(q_core, an):
-            best = max(best, 0.9)
-
-        # --- 2–3 токена ядра полностью покрыты alias-ядром (без требования почти полной фразы) ---
-        if 2 <= len(q_core) <= 3 and q_core_set and q_core_set.issubset(a_core_set):
-            best = max(best, 0.88 if len(q_core) == 3 else 0.9)
-
-        # --- Пересечение ядер (мягче, чем только полный qn) ---
-        if q_core_set and a_core_set:
-            inter_c = len(q_core_set & a_core_set)
-            if inter_c > 0:
-                q_cov_c = inter_c / max(len(q_core_set), 1)
-                if len(q_core_set) <= 3 and q_cov_c >= 0.67:
-                    best = max(best, 0.86)
-                elif q_cov_c >= 0.5:
-                    best = max(best, 0.8)
-
-        if qn == an:
-            best = max(best, 1.0)
-            continue
-        if qn in an or an in qn:
-            ratio = min(len(qn), len(an)) / max(len(qn), len(an))
-            best = max(best, 0.93 if ratio >= 0.85 else 0.82)
-            continue
-        a_tokens = {t for t in an.split() if len(t) >= 2}
-        if not q_tokens or not a_tokens:
-            continue
-        inter = len(q_tokens & a_tokens)
-        if inter == 0:
-            continue
-        overlap = inter / max(len(q_tokens), len(a_tokens))
-        q_cover = inter / max(len(q_tokens), 1)
-        a_cover = inter / max(len(a_tokens), 1)
-        if q_cover >= 0.9 and a_cover >= 0.4:
-            best = max(best, 0.9)
-        elif q_cover >= 0.75 and a_cover >= 0.35:
-            best = max(best, 0.85)
-        elif q_cover >= 0.6:
-            best = max(best, 0.8)
-        elif overlap >= 0.55:
-            best = max(best, 0.72)
-    return round(best, 4)
-
-
-def _lemma_join_token_match(inner: str, outer: str) -> bool:
-    """Совпадение по целым токенам (последовательность), не подстрока внутри одного слова.
-
-    Иначе лемма «имплант» из алиаса попадает внутрь «имплантолог» в запросе и даёт ложный strong-alias.
-    """
-    inner_t = inner.split()
-    outer_t = outer.split()
-    if not inner_t or not outer_t:
-        return False
-    if len(inner_t) == 1:
-        return inner_t[0] in outer_t
-    for i in range(len(outer_t) - len(inner_t) + 1):
-        if outer_t[i : i + len(inner_t)] == inner_t:
-            return True
-    return False
-
-
-def _lemma_alias_channel(q: str, ch: dict) -> float:
-    """Склонения: max с raw; pymorphy3 при наличии, иначе fallback на lower."""
-    q_core = _core_tokens(q)
-    if not q_core:
-        return 0.0
-    q_lem = alias_lexical.lemma_forms_for_tokens(q_core)
-    q_set = {x for x in q_lem if len(x) >= 2}
-    if not q_set:
-        return 0.0
-    best = 0.0
-    q_join = " ".join(q_lem)
-
-    for raw in _chunk_alias_terms(ch):
-        a_core = _core_tokens(raw)
-        if a_core:
-            a_lem = alias_lexical.lemma_forms_for_tokens(a_core)
-        else:
-            toks = [
-                t
-                for t in _norm_text(raw).split()
-                if len(t) >= 2 and t not in _ALIAS_STOP_WORDS
-            ]
-            a_lem = alias_lexical.lemma_forms_for_tokens(toks)
-        a_set = {x for x in a_lem if len(x) >= 2}
-        if not a_set:
-            continue
-
-        if q_set <= a_set:
-            best = max(best, 0.92)
-        if len(a_set) <= 5 and a_set <= q_set:
-            best = max(best, 0.88)
-
-        inter = len(q_set & a_set)
-        union = len(q_set | a_set) or 1
-        j = inter / union
-        if len(q_set) >= 2 and j >= 0.55:
-            best = max(best, 0.86)
-        elif j >= 0.45:
-            best = max(best, 0.78)
-
-        a_join = " ".join(a_lem)
-        if len(q_join) >= 3 and _lemma_join_token_match(q_join, a_join):
-            best = max(best, 0.93)
-        if len(a_join) >= 4 and _lemma_join_token_match(a_join, q_join):
-            best = max(best, 0.9)
-
-    return round(best, 4)
-
-
-def _trigram_alias_channel(q: str, ch: dict) -> float:
-    """Опечатки / близкие формы по триграммам (не заменяет raw/lemma).
-
-    Для короткого запроса и длинного алиаса целая строка даёт низкий Jaccard;
-    дополнительно сравниваем запрос с **отдельными словами** алиаса (парковку vs парковка).
-    """
-    qn = _norm_text(q)
-    if len(qn) < 2:
-        return 0.0
-    best = 0.0
+        if q_norm == an:
+            return 1.0, True, "exact"
+    best_near = 0.0
     for raw in _chunk_alias_terms(ch):
         an = _norm_text(raw)
-        if len(an) < 2:
+        if not an or len(an) < 2:
             continue
-        b = alias_lexical.trigram_alias_boost(qn, an)
-        for tok in an.split():
-            if len(tok) < 4:
-                continue
-            b = max(b, alias_lexical.trigram_alias_boost(qn, tok))
-        if b > best:
-            best = b
-    return round(best, 4)
+        if q_norm in an or an in q_norm:
+            ratio = min(len(q_norm), len(an)) / max(len(q_norm), len(an), 1)
+            if ratio >= float(thr.near_exact_length_ratio_min):
+                best_near = max(best_near, float(thr.near_exact_score))
+    if best_near > 0:
+        return best_near, False, "near_exact"
+    return 0.0, False, "none"
 
 
-def alias_hit_score_for_chunk(q: str, ch: dict) -> float:
-    raw = _alias_hit_score_raw_for_chunk(q, ch)
-    lem = _lemma_alias_channel(q, ch)
-    tri = _trigram_alias_channel(q, ch)
-    return round(max(raw, lem, tri), 4)
+def _tier_rank(tier: str) -> int:
+    return {
+        "exact": 5,
+        "near_exact": 4,
+        "embed_high": 3,
+        "rescue": 2,
+        "embed_medium": 1,
+        "none": 0,
+    }.get(tier, 0)
 
 
-def best_alias_hit(q: str, cands: list, *, strong_threshold: float = 0.9) -> tuple[dict | None, float]:
-    best_chunk = None
-    best_score = 0.0
-    for ch in cands or []:
-        sc = alias_hit_score_for_chunk(q, ch)
-        if sc > best_score:
-            best_score = sc
-            best_chunk = ch
-    if best_score >= strong_threshold:
-        return best_chunk, best_score
-    return None, best_score
-
-
-def corpus_alias_leader(
-    q: str,
+def _classify_alias_tier_for_chunk(
     *,
-    client_id: str | None = None,
-) -> tuple[dict | None, float]:
-    """Лучший чанк по алиасам и его score (без порога)."""
+    q_norm: str,
+    ch: dict,
+    emb_sim: float,
+    thr: Any,
+    rescue_env: bool,
+    top_emb_corpus_idx: int | None,
+    corpus_pos: int | None,
+) -> tuple[float, str]:
+    """Returns (effective_score, tier)."""
+    det, exact_hit, det_tier = _deterministic_alias_for_chunk(q_norm, ch)
+    sim = float(emb_sim)
+
+    if exact_hit or det >= 1.0:
+        return 1.0, "exact"
+
+    if det_tier == "near_exact" and det >= float(thr.near_exact_score):
+        return float(thr.near_exact_score), "near_exact"
+
+    hi = float(thr.embedding_high_min)
+    if sim >= hi:
+        return sim, "embed_high"
+
+    if (
+        rescue_env
+        and corpus_pos is not None
+        and top_emb_corpus_idx is not None
+        and corpus_pos == top_emb_corpus_idx
+        and sim >= float(thr.rescue_min_sim)
+    ):
+        return min(sim, float(thr.rescue_effective_cap)), "rescue"
+
+    med_lo = float(thr.embedding_medium_min)
+    med_hi = float(thr.embedding_medium_max)
+    cap_med = float(thr.embedding_medium_score_cap)
+    if med_lo <= sim < med_hi:
+        return min(sim, cap_med), "embed_medium"
+
+    return 0.0, "none"
+
+
+def _expand_alias_candidates_with_embed_topk(
+    corpus: list,
+    chunk_max: np.ndarray,
+    *,
+    client_id: str | None,
+    k_extra: int,
+) -> list[dict]:
+    """Add top-k chunks by alias-embedding max-sim to the candidate pool."""
+    if chunk_max.size == 0 or k_extra <= 0:
+        return []
+    scores = chunk_max.copy()
+    for i, c0 in enumerate(corpus):
+        if not isinstance(c0, dict):
+            scores[i] = -1.0
+            continue
+        if client_id and c0.get("client_id") != client_id:
+            scores[i] = -1.0
+    order = np.argsort(-scores)[: max(k_extra, 0)]
+    out: list[dict] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for i in order:
+        if float(scores[int(i)]) < 0:
+            continue
+        ch = corpus[int(i)]
+        if not isinstance(ch, dict):
+            continue
+        key = _chunk_key_tuple(ch)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ch)
+    return out
+
+
+def run_alias_pipeline(q: str, *, client_id: str | None = None) -> dict[str, Any]:
+    """PR #1.10: exact / near-exact + build-time alias embeddings + controlled rescue (+ optional legacy shadow)."""
+    thr = THRESHOLDS.alias
+    q_raw = (q or "").strip()
+    q_norm = _norm_text(q)
     corpus = load_corpus_if_needed()
+    n = len(corpus)
+    _load_alias_embed_artifacts()
+
     alias_idx = _ALIAS_INDEX or {}
     probe_terms = _alias_probe_terms(q)
-    candidate_map: dict[tuple, dict] = {}
+    candidate_map: dict[tuple[Any, Any, Any], dict] = {}
     for term in probe_terms:
         for ch in alias_idx.get(term, []):
             if client_id and ch.get("client_id") != client_id:
                 continue
-            key = (
-                ch.get("file"),
-                ch.get("h2_id") or ch.get("h2"),
-                ch.get("h3_id") or ch.get("h3"),
-            )
-            candidate_map[key] = ch
+            candidate_map[_chunk_key_tuple(ch)] = ch
     cands = list(candidate_map.values())
     if not cands:
         cands = [
@@ -738,16 +729,229 @@ def corpus_alias_leader(
             for ch in corpus
             if isinstance(ch, dict) and (not client_id or ch.get("client_id") == client_id)
         ]
-    best_chunk = None
-    best_score = 0.0
-    for ch in cands:
-        sc = alias_hit_score_for_chunk(q, ch)
-        if sc > best_score:
-            best_score = sc
-            best_chunk = ch
-    if not best_chunk:
-        return None, 0.0
-    return dict(best_chunk), round(best_score, 4)
+
+    chunk_max = np.full(n, -1.0, dtype=np.float32)
+    top_emb_corpus_idx: int | None = None
+    sim_top = 0.0
+    sim_second = 0.0
+    q_embed = normalize_retrieval_query(q_raw) or q_raw
+    if (
+        _ALIAS_EMB_MATRIX is not None
+        and int(_ALIAS_EMB_MATRIX.shape[0]) > 0
+        and _ALIAS_ROW_CORPUS_IDX is not None
+        and q_embed.strip()
+    ):
+        try:
+            v = embed_q(q_embed)
+            sims_rows = _ALIAS_EMB_MATRIX @ v
+            row_ok = np.ones(sims_rows.shape[0], dtype=bool)
+            if client_id:
+                row_ok = np.array(
+                    [(not cid) or (cid == client_id) for cid in (_ALIAS_ROW_CLIENT or [])],
+                    dtype=bool,
+                )
+            sims_f = sims_rows.astype(np.float32).copy()
+            sims_f[~row_ok] = -1.0
+            np.maximum.at(chunk_max, _ALIAS_ROW_CORPUS_IDX, sims_f)
+            for i in range(n):
+                c0 = corpus[i]
+                if not isinstance(c0, dict):
+                    chunk_max[i] = -1.0
+                elif client_id and c0.get("client_id") != client_id:
+                    chunk_max[i] = -1.0
+            valid = chunk_max[chunk_max >= 0.0]
+            if valid.size >= 1:
+                sim_top = float(np.max(valid))
+                top_emb_corpus_idx = int(np.argmax(chunk_max))
+            if valid.size >= 2:
+                srt = np.sort(valid)
+                sim_second = float(srt[-2])
+        except Exception as e:
+            log_json(logger, "alias_embed_query_failed", err=str(e)[:200])
+
+    margin = float(sim_top - sim_second) if sim_top > 0 and sim_second >= 0 else 1.0
+    core = _core_tokens(q_raw)
+    short = len(q_norm) <= int(thr.rescue_max_query_chars) and len(core) <= int(
+        thr.rescue_max_core_tokens
+    )
+    rescue_env = (
+        bool(short)
+        and margin >= float(thr.rescue_margin_min)
+        and sim_top >= float(thr.rescue_min_sim)
+    )
+
+    extra = _expand_alias_candidates_with_embed_topk(
+        corpus,
+        chunk_max,
+        client_id=client_id,
+        k_extra=int(thr.embed_matrix_top_chunks),
+    )
+    merged: dict[tuple[Any, Any, Any], dict] = { _chunk_key_tuple(ch): ch for ch in cands}
+    for ch in extra:
+        merged.setdefault(_chunk_key_tuple(ch), ch)
+    merged_cands = list(merged.values())
+
+    best_ch: dict | None = None
+    best_eff = -1.0
+    best_tier = "none"
+    best_sim = -1.0
+    best_exact = False
+    rank = 0
+
+    scored: list[tuple[int, float, float, str, dict]] = []
+    for ch in merged_cands:
+        pos = _corpus_index_for_chunk(corpus, ch)
+        emb_val = float(chunk_max[pos]) if pos is not None and 0 <= pos < n else -1.0
+        eff, tier = _classify_alias_tier_for_chunk(
+            q_norm=q_norm,
+            ch=ch,
+            emb_sim=emb_val,
+            thr=thr,
+            rescue_env=rescue_env,
+            top_emb_corpus_idx=top_emb_corpus_idx,
+            corpus_pos=pos,
+        )
+        scored.append((_tier_rank(tier), eff, emb_val, tier, ch))
+
+    scored = [x for x in scored if x[0] > 0 or x[1] > 1e-6]
+    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    if scored:
+        tr, eff, emb_val, tier, ch = scored[0]
+        best_ch = dict(ch)
+        best_eff = float(eff)
+        best_tier = tier
+        best_sim = float(emb_val)
+        best_exact = tier == "exact"
+        rank = 1
+        if len(scored) >= 2:
+            _, e2, _, _, _ = scored[1]
+            if e2 > 0:
+                margin = float(best_eff - e2)
+
+    diag: dict[str, Any] = {
+        "alias_exact_hit": bool(best_exact),
+        "alias_similarity": round(float(best_sim), 4) if best_sim >= 0 else None,
+        "alias_margin": round(float(margin), 4),
+        "alias_rank": int(rank),
+        "alias_decision": str(best_tier),
+        "alias_effective_score": round(float(max(best_eff, 0.0)), 4),
+        "alias_artifact_error": (_ALIAS_ARTIFACTS_ERROR or None),
+        "alias_rescue_env": bool(rescue_env),
+    }
+
+    if _legacy_shadow_enabled():
+        try:
+            import alias_scorer_legacy_shadow as _leg
+
+            old_ch, old_sc = _leg.corpus_alias_leader_legacy(q, client_id=client_id)
+            new_key = _leg.legacy_chunk_key(best_ch)
+            old_key = _leg.legacy_chunk_key(old_ch)
+            diag["old_alias_score"] = round(float(old_sc or 0.0), 4)
+            diag["old_alias_pick"] = (
+                {
+                    "file": old_ch.get("file") if isinstance(old_ch, dict) else None,
+                    "h2_id": old_ch.get("h2_id") if isinstance(old_ch, dict) else None,
+                    "h3_id": old_ch.get("h3_id") if isinstance(old_ch, dict) else None,
+                }
+                if isinstance(old_ch, dict)
+                else None
+            )
+            diag["new_alias_pick"] = (
+                {
+                    "file": best_ch.get("file") if isinstance(best_ch, dict) else None,
+                    "h2_id": best_ch.get("h2_id") if isinstance(best_ch, dict) else None,
+                    "h3_id": best_ch.get("h3_id") if isinstance(best_ch, dict) else None,
+                }
+                if isinstance(best_ch, dict)
+                else None
+            )
+            diag["old_vs_new_changed_decision"] = bool(new_key != old_key)
+        except Exception as e:
+            diag["old_vs_new_changed_decision"] = None
+            diag["alias_legacy_shadow_error"] = str(e)[:200]
+
+    eff_out = round(float(max(best_eff, 0.0)), 4)
+    if isinstance(best_ch, dict):
+        best_ch["_alias_score"] = eff_out
+        best_ch["_score"] = eff_out
+        best_ch["_alias_decision"] = str(best_tier)
+        best_ch["_alias_similarity"] = round(float(best_sim), 4) if best_sim >= 0 else None
+        h3 = (best_ch.get("h3_id") or best_ch.get("h2_id") or "korotko") or "korotko"
+        diag["alias_candidate_ref"] = f"{best_ch.get('file')}#{h3}"
+
+    log_json(
+        logger,
+        "alias_pipeline_result",
+        client_id=client_id,
+        query_preview=q_raw[:200],
+        **{k: v for k, v in diag.items() if isinstance(v, (str, int, float, bool, type(None)))},
+    )
+    return {
+        "leader": best_ch,
+        "effective_score": eff_out,
+        "diag": diag,
+    }
+
+
+def corpus_alias_leader(
+    q: str,
+    *,
+    client_id: str | None = None,
+) -> tuple[dict | None, float, dict[str, Any]]:
+    """Best corpus chunk by alias pipeline and diagnostics dict (third element)."""
+    r = run_alias_pipeline(q, client_id=client_id)
+    return r["leader"], float(r["effective_score"]), dict(r["diag"])
+
+
+def alias_debug_score_for_chunk(q: str, ch: dict, *, client_id: str | None = None) -> dict[str, Any]:
+    """Debug-only: alias components for one chunk (used by /__debug/retrieval)."""
+    q_raw = (q or "").strip()
+    q_norm = _norm_text(q)
+    corpus = load_corpus_if_needed()
+    _load_alias_embed_artifacts()
+    pos = _corpus_index_for_chunk(corpus, ch)
+    n = len(corpus)
+    chunk_max = np.full(n, -1.0, dtype=np.float32)
+    q_embed = normalize_retrieval_query(q_raw) or q_raw
+    if (
+        pos is not None
+        and _ALIAS_EMB_MATRIX is not None
+        and int(_ALIAS_EMB_MATRIX.shape[0]) > 0
+        and q_embed.strip()
+    ):
+        try:
+            v = embed_q(q_embed)
+            sims_rows = _ALIAS_EMB_MATRIX @ v
+            row_ok = np.ones(sims_rows.shape[0], dtype=bool)
+            if client_id:
+                row_ok = np.array(
+                    [(not cid) or (cid == client_id) for cid in (_ALIAS_ROW_CLIENT or [])],
+                    dtype=bool,
+                )
+            sims_f = sims_rows.astype(np.float32).copy()
+            sims_f[~row_ok] = -1.0
+            np.maximum.at(chunk_max, _ALIAS_ROW_CORPUS_IDX, sims_f)
+        except Exception:
+            pass
+    emb_val = float(chunk_max[pos]) if pos is not None else -1.0
+    det, exact_hit, det_tier = _deterministic_alias_for_chunk(q_norm, ch)
+    eff, tier = _classify_alias_tier_for_chunk(
+        q_norm=q_norm,
+        ch=ch,
+        emb_sim=emb_val,
+        thr=THRESHOLDS.alias,
+        rescue_env=False,
+        top_emb_corpus_idx=None,
+        corpus_pos=pos,
+    )
+    return {
+        "alias_effective": round(float(eff), 4),
+        "alias_tier": tier,
+        "alias_exact_hit": bool(exact_hit),
+        "alias_det_score": round(float(det), 4),
+        "alias_det_tier": det_tier,
+        "alias_emb_sim": round(float(emb_val), 4) if emb_val >= 0 else None,
+    }
 
 
 def best_alias_hit_in_corpus(
@@ -756,9 +960,13 @@ def best_alias_hit_in_corpus(
     client_id: str | None = None,
     strong_threshold: float | None = None,
 ) -> tuple[dict | None, float]:
-    thr = ALIAS_STRONG_THRESHOLD if strong_threshold is None else strong_threshold
-    leader, score = corpus_alias_leader(q, client_id=client_id)
-    if leader and score >= thr:
+    thr_val = (
+        float(THRESHOLDS.alias.strong_effective_min)
+        if strong_threshold is None
+        else float(strong_threshold)
+    )
+    leader, score, _diag = corpus_alias_leader(q, client_id=client_id)
+    if leader and score >= thr_val:
         chosen = dict(leader)
         chosen["_alias_score"] = round(score, 4)
         chosen["_score"] = round(score, 4)

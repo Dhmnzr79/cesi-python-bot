@@ -203,8 +203,8 @@ def collect_content_candidates(
     cat_anchor = _anchor_from_ref(md_ref) if md_ref else ""
     cat_is_overview = bool(md_ref and _is_overview_anchor(cat_anchor))
 
-    alias_leader, alias_score = corpus_alias_leader(q_norm, client_id=client_id)
-    # `corpus_alias_leader` returns (chunk, score). It does not expose which alias phrase matched.
+    alias_leader, alias_score, alias_diag = corpus_alias_leader(q_norm, client_id=client_id)
+    # `corpus_alias_leader` returns (chunk, score, diag). PR #1.10: diag carries alias_* telemetry.
     # For P0 we approximate "specificity" from the normalized user query token count.
     # This stays deterministic and avoids any per-phrase keyword exceptions.
     alias_text = q_norm
@@ -257,6 +257,11 @@ def collect_content_candidates(
             "is_overview": bool(prref and _is_overview_anchor(cat_anchor2)),
             "service": cat.get("service") if isinstance(cat.get("service"), dict) else {},
         }
+    alias_tel = {
+        k: v
+        for k, v in (alias_diag or {}).items()
+        if k.startswith("alias_") or k.startswith("old_")
+    }
     alias_candidate = {
         "leader": _slim_chunk_for_log(alias_leader) if isinstance(alias_leader, dict) else None,
         # Full chunk kept for immediate execution if selected; never log this.
@@ -266,6 +271,7 @@ def collect_content_candidates(
         "alias_text": alias_text[:120] if isinstance(alias_text, str) else None,
         "alias_score": float(alias_score or 0.0) if alias_score is not None else None,
         "specificity": alias_spec,
+        **alias_tel,
     }
 
     debug_meta = {

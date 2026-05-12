@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -125,6 +126,48 @@ def _infer_route_from_response(resp: dict[str, Any]) -> str:
     return ""
 
 
+def _debug_fail_must_contain(
+    *,
+    case_id: str,
+    route: str,
+    must_contain: list[str],
+    missing: list[str],
+    answer: str,
+    resp: dict[str, Any],
+) -> None:
+    """When must_contain fails: show repr(needles), repr(answer prefix), route (harness vs answer mismatch)."""
+    print("\n--- SMOKE_DEBUG_FAIL (must_contain) ---", flush=True)
+    print(f"case_id: {case_id!r}", flush=True)
+    print(f"route: {route!r}", flush=True)
+    print(f"must_contain (declared): {must_contain!r}", flush=True)
+    print(f"missing needles repr: {[repr(x) for x in missing]}", flush=True)
+    print(f"answer len: {len(answer)}", flush=True)
+    print(f"answer[:300] repr: {answer[:300]!r}", flush=True)
+    meta = resp.get("meta")
+    if isinstance(meta, dict):
+        vs = meta.get("verifier_shadow")
+        if vs is not None:
+            frag = json.dumps(vs, ensure_ascii=False) if isinstance(vs, (dict, list)) else str(vs)
+            print(f"meta.verifier_shadow (trunc) repr: {frag[:500]!r}", flush=True)
+        apm = meta.get("answer_preview")
+        if apm is not None:
+            print(f"meta.answer_preview repr: {str(apm)[:300]!r}", flush=True)
+    ap_top = resp.get("answer_preview")
+    if ap_top is not None and str(ap_top) != answer:
+        print(f"resp.answer_preview (top-level) repr: {str(ap_top)[:300]!r}", flush=True)
+    print("--- end SMOKE_DEBUG_FAIL ---\n", flush=True)
+
+
+def _print_lines_unicode_fallback(unicode_lines: list[str], ascii_lines: list[str]) -> None:
+    """Windows cp1251 и др.: box-drawing / UTF-8 может не кодироваться в stdout."""
+    try:
+        for ln in unicode_lines:
+            print(ln)
+    except UnicodeEncodeError:
+        for ln in ascii_lines:
+            print(ln)
+
+
 def _print_table(rows: list[CaseResult]) -> None:
     w_id = max(10, max((len(r.case_id) for r in rows), default=10))
     w_status = 6
@@ -146,6 +189,21 @@ def _print_table(rows: list[CaseResult]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv or [])
+    ap = argparse.ArgumentParser(
+        description="v5 e2e smoke runner",
+        allow_abbrev=False,
+    )
+    ap.add_argument(
+        "--case-id",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="Run only case(s) with this id (repeatable). Also: E2E_SMOKE_CASE_ID=id1,id2",
+    )
+    ns, unknown = ap.parse_known_args(argv)
+    if unknown:
+        print(f"WARNING: ignored unknown args: {unknown!r}", file=sys.stderr, flush=True)
+
     path = os.getenv("E2E_SMOKE_PATH") or _here("e2e_smoke.json")
     bot_url = (os.getenv("BOT_URL") or "http://localhost:5000/ask").strip()
     timeout_sec = float(os.getenv("BOT_TIMEOUT_SEC") or "20")
@@ -158,6 +216,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if baseline is not None and not isinstance(baseline, int):
         raise ValueError("baseline must be null or int")
+
+    filter_ids: set[str] | None = None
+    raw_ids: list[str] = []
+    if ns.case_id:
+        raw_ids.extend(str(x).strip() for x in ns.case_id if str(x).strip())
+    env_csv = (os.getenv("E2E_SMOKE_CASE_ID") or "").strip()
+    if env_csv:
+        raw_ids.extend(x.strip() for x in env_csv.split(",") if x.strip())
+    if raw_ids:
+        filter_ids = set(raw_ids)
+
+    if filter_ids is not None:
+        filtered: list[dict[str, Any]] = []
+        for r in cases:
+            if not isinstance(r, dict):
+                continue
+            cid = str(r.get("id") or "").strip()
+            if cid in filter_ids:
+                filtered.append(r)
+        missing_spec = filter_ids - {str(r.get("id") or "").strip() for r in cases if isinstance(r, dict)}
+        if missing_spec:
+            print(f"WARNING: case id(s) not in spec file: {sorted(missing_spec)!r}", file=sys.stderr, flush=True)
+        if not filtered:
+            raise ValueError(f"E2E smoke: no cases match --case-id / E2E_SMOKE_CASE_ID filter {sorted(filter_ids)!r}")
+        cases = filtered
 
     results: list[CaseResult] = []
     passed = 0
@@ -258,6 +341,14 @@ def main(argv: list[str] | None = None) -> int:
 
         missing = [x for x in must_contain if x and not _contains_ci(answer, x)]
         if missing:
+            _debug_fail_must_contain(
+                case_id=case_id,
+                route=route,
+                must_contain=list(must_contain),
+                missing=missing,
+                answer=answer,
+                resp=resp,
+            )
             failed += 1
             results.append(
                 CaseResult(
@@ -299,16 +390,28 @@ def main(argv: list[str] | None = None) -> int:
         by_tot[cc] = by_tot.get(cc, 0) + 1
         if r.status == "PASS":
             by_ok[cc] = by_ok.get(cc, 0) + 1
-    print("┌──────────────┬─────────┬─────────┐")
-    print("│ class        │ passed  │ total   │")
-    print("├──────────────┼─────────┼─────────┤")
-    for c in _classes:
-        print(f"│ {c:<12} │ {by_ok[c]:>7} │ {by_tot[c]:>7} │")
-    print("└──────────────┴─────────┴─────────┘")
+    u_lines = [
+        "┌──────────────┬─────────┬─────────┐",
+        "│ class        │ passed  │ total   │",
+        "├──────────────┼─────────┼─────────┤",
+        *[f"│ {c:<12} │ {by_ok[c]:>7} │ {by_tot[c]:>7} │" for c in _classes],
+        "└──────────────┴─────────┴─────────┘",
+    ]
+    a_lines = [
+        "+--------------+---------+---------+",
+        "| class        | passed  | total   |",
+        "+--------------+---------+---------+",
+        *[f"| {c:<12} | {by_ok[c]:>7} | {by_tot[c]:>7} |" for c in _classes],
+        "+--------------+---------+---------+",
+    ]
+    _print_lines_unicode_fallback(u_lines, a_lines)
 
     # Exit code policy:
     # - If baseline is null: exit 0 iff no ERROR (runner can still be used to set baseline).
     # - If baseline is set: require passed >= baseline-2, else exit 1.
+    # - If --case-id / E2E_SMOKE_CASE_ID filter is used: strict per selected case(s) only (ignore baseline).
+    if filter_ids is not None:
+        return 0 if errors == 0 and failed == 0 else (2 if errors > 0 else 1)
     if baseline is None:
         return 0 if errors == 0 else 2
 

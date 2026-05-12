@@ -53,6 +53,29 @@ class CatalogMatchThresholds(BaseModel):
     containment_min: float = Field(..., ge=0.0, le=1.0)
 
 
+class AliasThresholds(BaseModel):
+    """PR #1.10 alias pipeline thresholds (see IMPLEMENTATION_PLAN PR #1.10)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strong_effective_min: float = Field(..., ge=0.0, le=1.0)
+    soft_assist_min: float = Field(..., ge=0.0, le=1.0)
+    near_exact_score: float = Field(..., ge=0.0, le=1.0)
+    near_exact_length_ratio_min: float = Field(..., ge=0.0, le=1.0)
+    embedding_high_min: float = Field(..., ge=0.0, le=1.0)
+    embedding_strong_cosine_min: float = Field(..., ge=0.0, le=1.0)
+    embedding_medium_min: float = Field(..., ge=0.0, le=1.0)
+    embedding_medium_max: float = Field(..., ge=0.0, le=1.0)
+    embedding_medium_score_cap: float = Field(..., ge=0.0, le=1.0)
+    rescue_max_query_chars: int = Field(..., ge=1, le=256)
+    rescue_max_core_tokens: int = Field(..., ge=1, le=32)
+    rescue_min_sim: float = Field(..., ge=0.0, le=1.0)
+    rescue_margin_min: float = Field(..., ge=0.0, le=1.0)
+    rescue_effective_cap: float = Field(..., ge=0.0, le=1.0)
+    scope_guard_min: float = Field(..., ge=0.0, le=1.0)
+    embed_matrix_top_chunks: int = Field(..., ge=8, le=512)
+
+
 class Thresholds(BaseModel):
     """Validated representation of `core/routing.yaml` (see ARCHITECTURE V5.md §D2)."""
 
@@ -63,6 +86,7 @@ class Thresholds(BaseModel):
     verifier: VerifierThresholds
     retrieval: RetrievalThresholds
     catalog_match: CatalogMatchThresholds
+    alias: AliasThresholds
 
 
 _LOCK = threading.Lock()

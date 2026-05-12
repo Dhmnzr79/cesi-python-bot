@@ -5,8 +5,6 @@ import re
 from typing import Any
 
 from config import (
-    ALIAS_SOFT_THRESHOLD,
-    ALIAS_STRONG_THRESHOLD,
     LOW_SCORE_THRESHOLD,
     QUERY_REWRITE_ON,
     DEFAULT_CLIENT_ID,
@@ -107,8 +105,18 @@ def select_chunk_for_question(
         )
     widen_fb = bool(tel_p.get("scope_widen_fallback")) or bool(tel_s.get("scope_widen_fallback"))
 
+    # Defaults so early returns (e.g. no_candidates) can call _dm() before corpus_alias_leader runs.
+    alias_leader: dict | None = None
+    alias_score = 0.0
+    alias_diag: dict[str, Any] = {}
+
     def _dm(extra: dict) -> dict:
-        return {**base_meta, **extra, "scope_widen_fallback": widen_fb}
+        tel = {
+            k: v
+            for k, v in alias_diag.items()
+            if k.startswith("alias_") or k.startswith("old_")
+        }
+        return {**base_meta, **extra, **tel, "scope_widen_fallback": widen_fb}
 
     cands = merge_retrieval_candidates(primary, secondary)[:8]
     cands = prefer_overview_if_broad(cands, broad_query_detect(q_policy))
@@ -120,15 +128,32 @@ def select_chunk_for_question(
 
     is_contacts = contacts_intent(q_policy)
     is_price = price_intent(q_policy)
-    alias_leader, alias_score = corpus_alias_leader(q_policy, client_id=client_id)
-    alias_strong = bool(alias_leader and alias_score >= ALIAS_STRONG_THRESHOLD)
+    alias_leader, alias_score, alias_diag = corpus_alias_leader(q_policy, client_id=client_id)
+    tier = str(alias_diag.get("alias_decision") or "")
+    sim_raw = float(alias_diag.get("alias_similarity") or 0.0)
+    ath = THRESHOLDS.alias
+    alias_strong = bool(
+        alias_leader
+        and alias_score >= float(ath.strong_effective_min)
+        and (
+            tier in ("exact", "near_exact")
+            or (
+                tier == "embed_high"
+                and sim_raw >= float(ath.embedding_strong_cosine_min)
+            )
+            or (
+                tier == "rescue"
+                and sim_raw >= float(ath.embedding_strong_cosine_min)
+            )
+        )
+    )
 
     top_score = float(cands[0].get("_score") or 0.0)
     allow_low = alias_strong or (is_contacts and pick_contacts_chunk(cands)) or (
         is_price and pick_prices_chunk(cands)
     )
     if top_score < LOW_SCORE_THRESHOLD and not allow_low:
-        if alias_leader and alias_score >= ALIAS_SOFT_THRESHOLD:
+        if alias_leader and alias_score >= float(THRESHOLDS.alias.soft_assist_min):
             soft = dict(alias_leader)
             soft["_alias_score"] = round(alias_score, 4)
             soft["_score"] = round(float(alias_score), 4)
@@ -401,9 +426,9 @@ def compute_retrieval_scope_with_conflict_guard(
         return None, "catalog_match"
 
     q_pol = normalize_retrieval_query(q0) or q0
-    _leader, alias_sc = corpus_alias_leader(q_pol, client_id=client_id)
+    _leader, alias_sc, _alias_diag = corpus_alias_leader(q_pol, client_id=client_id)
     alias_val = float(alias_sc or 0.0)
-    if alias_val >= float(THRESHOLDS.retrieval.alias_scope_guard_min):
+    if alias_val >= float(THRESHOLDS.alias.scope_guard_min):
         return None, "alias_hit"
 
     return raw, "none"
