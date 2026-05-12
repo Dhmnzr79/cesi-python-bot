@@ -34,3 +34,5 @@ class AskOrchestrationResult(BaseModel):
     llm_question: str | None = None
     log_event: str = "Answer generated"
     chunk_route: str = "retrieval_chunk"
+    # Детерминированный хвост ответа (например цена из каталога), не через инструкции к LLM.
+    generator_append_text: str | None = None

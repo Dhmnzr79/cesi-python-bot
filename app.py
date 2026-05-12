@@ -128,7 +128,10 @@ APP_ENV = (os.getenv("APP_ENV") or "local").strip().lower()
 _APPLY_POLICY_PARAMS = inspect.signature(apply_response_policy).parameters
 init_pg_sink(logger)
 TXT = {
-    "lead_name_prompt": "Отлично. Как к вам можно обращаться?",
+    "lead_name_prompt": (
+        "Поняла. Передам ваши данные администратору — он подскажет ближайшее доступное время. "
+        "Как к вам можно обращаться?"
+    ),
     "lead_name_retry": "Как к вам можно обращаться? Напишите, пожалуйста, имя.",
     "lead_name_hard": "Напишите просто имя — например, Мария или Андрей.",
     "lead_name_invalid": "Не совсем поняла — напишите просто имя, например Мария.",
@@ -1473,7 +1476,7 @@ def _orchestrate_ask_turn(data: dict):
             md_ref = _with_default_anchor(str(cat.get('md_entry_ref') or ''))
             service = cat.get('service') or {}
             price_line = _service_price_line_for_content(service, client_id)
-            price_applied = False
+            gen_append = (price_line or "").strip() or None
             if md_ref:
                 ch = get_chunk_by_ref(md_ref, client_id=client_id)
                 if ch:
@@ -1481,9 +1484,6 @@ def _orchestrate_ask_turn(data: dict):
                     if sid_svc:
                         set_last_catalog_service(sid, sid_svc)
                     llm_q = q or f'Информация из {md_ref}'
-                    if price_line:
-                        llm_q = f'{llm_q}\n\nВажно: если это уместно, явно укажи в ответе: {price_line}'
-                        price_applied = True
                     if request.ctx.get('a3_catalog_md_session_hint'):
                         low = (q or '').lower()
                         if 'врем' in low or 'срок' in low or 'сколько' in low:
@@ -1492,8 +1492,8 @@ def _orchestrate_ask_turn(data: dict):
                                 'Пациент спрашивает про длительность или сроки по этой услуге. Ответь кратко и '
                                 'обязательно включи в ответ слово «срок» или «сроки» (типичный ориентир по этапам).'
                             )
-                    emit_bot_event(logger, 'content_arbiter_price_injection', status='ok', details={'selected_route': 'catalog_md_first', 'price_line_applied': bool(price_applied), 'md_entry_ref': md_ref, 'matched_service_id': sid_svc})
-                    return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llm_q, log_event='Answer generated from md_entry_ref', chunk_route='catalog_md_first', decision_frame=_orch_decision_dump(decision))
+                    emit_bot_event(logger, 'content_arbiter_price_injection', status='ok', details={'selected_route': 'catalog_md_first', 'price_line_applied': bool(gen_append), 'md_entry_ref': md_ref, 'matched_service_id': sid_svc})
+                    return AskOrchestrationResult(kind='chunk', q=q, sid=sid, client_id=client_id, chosen_chunk=ch, llm_question=llm_q, log_event='Answer generated from md_entry_ref', chunk_route='catalog_md_first', decision_frame=_orch_decision_dump(decision), generator_append_text=gen_append)
         if sel.selected_route == 'catalog_facts':
             cat = cands.catalog
             svc = cat.get('service') or {}
@@ -1599,6 +1599,7 @@ def _dispatch_orchestration_json(orch_r: AskOrchestrationResult):
             llm_question=orch_r.llm_question,
             log_event=orch_r.log_event,
             route=orch_r.chunk_route,
+            generator_append_text=orch_r.generator_append_text,
         )
     raise RuntimeError(f"bad orchestration kind: {orch_r.kind}")
 
@@ -1694,6 +1695,7 @@ def _sse_chunk_response(
     llm_question: str | None = None,
     log_event: str = "Answer generated",
     route: str = "retrieval_chunk",
+    generator_append_text: str | None = None,
 ):
     """Стриминговый ответ из чанка через SSE."""
     return app.response_class(
@@ -1708,6 +1710,7 @@ def _sse_chunk_response(
                 llm_question=llm_question,
                 log_event=log_event,
                 route=route,
+                generator_append_text=generator_append_text,
             ),
         ),
         mimetype="text/event-stream",
@@ -1742,6 +1745,7 @@ def _dispatch_orchestration_sse(orch_r: AskOrchestrationResult):
             llm_question=orch_r.llm_question,
             log_event=orch_r.log_event,
             route=orch_r.chunk_route,
+            generator_append_text=orch_r.generator_append_text,
         )
     raise RuntimeError(f"bad orchestration kind: {orch_r.kind}")
 

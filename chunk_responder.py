@@ -106,6 +106,48 @@ def chunk_context_md_for_llm(chunk: dict) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+def source_ref_from_chunk(chunk: dict) -> str:
+    """Единственный ref источника для Generator (basename.md#anchor)."""
+    meta = chunk.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    file = str(chunk.get("file") or "")
+    base = os.path.basename(file)
+    if not base:
+        return ""
+    if not base.lower().endswith(".md"):
+        base = f"{base}.md"
+    h3 = str(chunk.get("h3_id") or meta.get("h3_id") or "").strip()
+    h2 = str(chunk.get("h2_id") or meta.get("h2_id") or "").strip()
+    anchor = (h3 or h2 or "korotko").strip().lower() or "korotko"
+    return f"{base}#{anchor}"
+
+
+def build_generator_source_from_chunk(chunk: dict, meta: dict) -> dict:
+    """Один элемент sources[] для LLM (длина 1)."""
+    m = meta if isinstance(meta, dict) else {}
+    doc_id = str(m.get("doc_id") or "").strip()
+    if not doc_id:
+        doc_id = os.path.splitext(os.path.basename(str(chunk.get("file") or "")))[0]
+    return {
+        "ref": source_ref_from_chunk(chunk),
+        "content": chunk_context_md_for_llm(chunk),
+        "doc_id": doc_id or None,
+        "doc_type": str(m.get("doc_type") or chunk.get("doc_type") or "") or None,
+        "subtype": str(m.get("subtype") or chunk.get("subtype") or "") or None,
+    }
+
+
+def _append_generator_append_text(answer: str, append_text: str | None) -> str:
+    at = (append_text or "").strip()
+    if not at:
+        return answer
+    base = (answer or "").strip()
+    if at in base:
+        return answer
+    return f"{base}\n\n{at}" if base else at
+
+
 def ensure_answer(answer: str, chunk: dict) -> str:
     if isinstance(answer, str) and answer.strip():
         return answer
@@ -138,6 +180,7 @@ def respond_from_chunk(
     llm_question: str | None = None,
     log_event: str = "Answer generated",
     route: str = "retrieval_chunk",
+    generator_append_text: str | None = None,
 ):
     if (q or "").strip():
         mem_add_user(sid, q)
@@ -146,10 +189,24 @@ def respond_from_chunk(
     if doc_id:
         set_current_doc(sid, doc_id)
 
+    sources = [build_generator_source_from_chunk(chunk, meta)]
+    s0 = sources[0]
+    generator_input = {
+        "source_ref": s0.get("ref"),
+        "source_count": 1,
+        "route": route,
+        "doc_id": s0.get("doc_id"),
+        "doc_type": s0.get("doc_type"),
+        "subtype": s0.get("subtype"),
+        "h2_id": chunk.get("h2_id"),
+        "h3_id": chunk.get("h3_id"),
+    }
+
     answer, profile = generate_answer_with_empathy(
-        llm_question or q, chunk_context_md_for_llm(chunk), meta, sid
+        llm_question or q, sources, meta, sid
     )
     answer = ensure_answer(answer, chunk)
+    answer = _append_generator_append_text(answer, generator_append_text)
 
     st = mem_get(sid)
     lead_flow_active = is_active_lead_flow(st)
@@ -193,6 +250,7 @@ def respond_from_chunk(
     )
     refs_before_ui = list(payload.get("quick_replies") or [])
     payload = normalize_policy_payload(payload)
+    payload.setdefault("meta", {})["generator_input"] = generator_input
     pdec = (payload.get("meta") or {}).get("policy_decision") or {}
     ui_dropped = set((payload.get("meta") or {}).get("ui_dropped") or [])
     if doc_id:
@@ -224,6 +282,7 @@ def respond_from_chunk(
         file=chunk.get("file"),
         score=round(float(chunk.get("_score", 0.0)), 3),
         answer_length=len(answer),
+        generator_input=generator_input,
     )
     qs = (q or "").strip()
     turn_meta = (
@@ -248,6 +307,7 @@ def respond_from_chunk_stream(
     llm_question: str | None = None,
     log_event: str = "Answer generated",
     route: str = "retrieval_chunk",
+    generator_append_text: str | None = None,
 ):
     """Generator yielding SSE strings: text_delta → ui → done.
 
@@ -261,12 +321,25 @@ def respond_from_chunk_stream(
     if doc_id:
         set_current_doc(sid, doc_id)
 
+    sources = [build_generator_source_from_chunk(chunk, meta)]
+    s0 = sources[0]
+    generator_input = {
+        "source_ref": s0.get("ref"),
+        "source_count": 1,
+        "route": route,
+        "doc_id": s0.get("doc_id"),
+        "doc_type": s0.get("doc_type"),
+        "subtype": s0.get("subtype"),
+        "h2_id": chunk.get("h2_id"),
+        "h3_id": chunk.get("h3_id"),
+    }
+
     full_text = ""
     profile: dict = {}
 
     try:
         for event_type, value in generate_answer_stream(
-            llm_question or q, chunk_context_md_for_llm(chunk), meta, sid
+            llm_question or q, sources, meta, sid
         ):
             if event_type == "delta":
                 full_text += value
@@ -279,6 +352,11 @@ def respond_from_chunk_stream(
             full_text = LLM_FALLBACK_ANSWER
 
     answer = ensure_answer(full_text, chunk)
+    base_ans = answer
+    answer = _append_generator_append_text(answer, generator_append_text)
+    extra = answer[len(base_ans) :] if len(answer) > len(base_ans) else ""
+    if extra:
+        yield f"event: text_delta\ndata: {_json.dumps({'delta': extra}, ensure_ascii=False)}\n\n"
 
     # Все session side-effects — идентично respond_from_chunk
     st = mem_get(sid)
@@ -323,6 +401,7 @@ def respond_from_chunk_stream(
     )
     refs_before_ui = list(payload.get("quick_replies") or [])
     payload = normalize_policy_payload(payload)
+    payload.setdefault("meta", {})["generator_input"] = generator_input
     pdec = (payload.get("meta") or {}).get("policy_decision") or {}
     ui_dropped = set((payload.get("meta") or {}).get("ui_dropped") or [])
 
@@ -353,6 +432,7 @@ def respond_from_chunk_stream(
         file=chunk.get("file"),
         score=round(float(chunk.get("_score", 0.0)), 3),
         answer_length=len(answer),
+        generator_input=generator_input,
     )
     qs = (q or "").strip()
     turn_meta = (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -258,6 +259,56 @@ def eval_arbiter() -> EvalResult:
     )
 
 
+def _gen_norm(s: str) -> str:
+    return (s or "").lower().replace("ё", "е")
+
+
+def _generator_faithfulness_violations(source_text: str, answer: str) -> list[str]:
+    """Детерминированные high-risk сигналы: числа/деньги/%/сроки/абсолютные обещания вне source_text."""
+    s0 = source_text or ""
+    sn = _gen_norm(s0)
+    an = _gen_norm(answer or "")
+    bad: list[str] = []
+    if ("₽" in (answer or "")) and ("₽" not in s0):
+        bad.append("currency_ruble_sign")
+    if re.search(r"\bруб", an) and not re.search(r"\bруб", sn):
+        bad.append("currency_rub_word")
+    if re.search(r"\bр\.\s*\d", an) and not re.search(r"\bр\.\s*\d", sn):
+        bad.append("currency_rp_dot")
+    # проценты, включая десятичные с запятой/точкой (99,8%, 12.5%)
+    for m in re.finditer(r"\d+(?:[.,]\d+)?\s*%", answer or ""):
+        frag_ans = m.group(0)
+        norm_ans = frag_ans.replace(" ", "").replace(",", ".")
+        norm_src = s0.replace(" ", "").replace(",", ".")
+        if norm_ans not in norm_src:
+            bad.append("percent:" + frag_ans)
+    if re.search(r"\b100\s*%", an) and "100" not in sn:
+        bad.append("hundred_percent")
+    for m in re.finditer(r"\d{2,}", answer or ""):
+        if m.group(0) not in s0:
+            bad.append("number2+:" + m.group(0))
+    # сроки: годы, месяцы, дни/сутки (разные падежи)
+    duration_re = re.compile(
+        r"\b\d{1,3}\s*(?:лет|года|год|месяц|месяца|месяцев|недел\w*|день|дня|дней|сутки|суток)\b",
+        re.U,
+    )
+    for m in duration_re.finditer(an):
+        t = re.sub(r"\s+", " ", m.group(0)).strip()
+        if t.replace(" ", "") not in sn.replace(" ", ""):
+            bad.append("duration:" + t)
+    # абсолютные обещания безопасности/гарантий
+    for w in (
+        "абсолютно безопасно",
+        "абсолютно безопасна",
+        "гарантированно",
+        "100% безопасно",
+        "пожизненная гарантия",
+    ):
+        if w in an and w not in sn:
+            bad.append("absolute:" + w)
+    return bad
+
+
 def eval_verifier() -> EvalResult:
     cases = _load_json(_here("verifier_golden.json"))
     return EvalResult(
@@ -269,10 +320,46 @@ def eval_verifier() -> EvalResult:
 
 def eval_generator() -> EvalResult:
     cases = _load_json(_here("generator_golden.json"))
+    total = 0
+    ok = 0
+    bad: list[dict[str, Any]] = []
+    for row in cases:
+        cid = str(row.get("id") or "")
+        src = str(row.get("source_text") or "")
+        ans = str(row.get("answer") or "")
+        exp = row.get("expected") or {}
+        if not isinstance(exp, dict):
+            continue
+        want = exp.get("faithful")
+        if want is None:
+            continue
+        total += 1
+        v = _generator_faithfulness_violations(src, ans)
+        passed = (len(v) == 0) if bool(want) else (len(v) > 0)
+        if passed:
+            ok += 1
+        else:
+            bad.append(
+                {
+                    "id": cid,
+                    "faithful_expected": bool(want),
+                    "violations": v,
+                    "answer_preview": ans[:120],
+                }
+            )
+    if total == 0:
+        return EvalResult(layer="generator", status="SKIP", details={"cases": 0, "reason": "no_cases"})
+    acc = ok / total
+    status: Literal["OK", "FAIL"] = "OK" if acc >= 0.95 else "FAIL"
     return EvalResult(
         layer="generator",
-        status="SKIP",
-        details={"cases": len(cases), "reason": "generator_eval_not_implemented_yet"},
+        status=status,
+        details={
+            "cases": total,
+            "ok": ok,
+            "accuracy": round(acc, 4),
+            "bad_examples": bad[:25],
+        },
     )
 
 
@@ -300,7 +387,8 @@ def main(argv: list[str] | None = None) -> int:
     for r in results:
         _print_result(r)
 
-    # Do not fail Phase 0 because layers aren't implemented yet.
+    if any(r.status == "FAIL" for r in results):
+        return 1
     return 0
 
 

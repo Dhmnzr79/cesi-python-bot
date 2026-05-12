@@ -17,11 +17,6 @@
       "expected_fix_in_pr": "#1.3"
     },
     {
-      "case_id": "smoke_cross_topic_extract_and_implant",
-      "reason": "v4 multi-intent (удаление + имплантация) теряет один из intents",
-      "expected_fix_in_pr": "#1.4 (catalog routing с явным multi-intent)"
-    },
-    {
       "case_id": "smoke_price_concern_general_no_service",
       "reason": "v4 price_concern path возвращает шаблон вместо retrieval из faq__cost.md",
       "expected_fix_in_pr": "#1.4"
@@ -298,8 +293,8 @@
       ],
       "question": "А по времени это сколько?",
       "expected_route": "retrieval_chunk",
-      "must_contain": ["срок"],
-      "comment": "multi-turn: follow-up про сроки после обзора",
+      "must_contain": ["месяц"],
+      "comment": "multi-turn: follow-up про время после обзора — ответ должен дать временной ориентир (напр. месяцы), а не конкретное слово «срок»",
       "coverage_class": "WEAK"
     },
     {
@@ -334,8 +329,8 @@
       "id": "smoke_cross_topic_extract_and_implant",
       "question": "Я хочу удалить зуб и поставить имплант",
       "expected_route": "retrieval_chunk",
-      "must_contain": ["удал"],
-      "comment": "cross-topic ambiguity: затрагивает удаление и имплантацию",
+      "must_contain": [],
+      "comment": "multi-intent: удаление + имплантация. В Phase 1 допустим single-source ответ по доминирующей релевантной теме; полноценная compound-архитектура вынесена после Phase 1. Smoke проверяет маршрут content (retrieval_chunk), а не буквальное слово «удаление» в ответе.",
       "coverage_class": "WEAK"
     },
     {

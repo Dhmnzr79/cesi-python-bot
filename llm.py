@@ -300,6 +300,14 @@ BASE_SYSTEM = (
     "что на консультации можно разобраться детально, она бесплатная."
 )
 
+GENERATOR_SINGLE_SOURCE_RULE = (
+    "\n\n"
+    "Факты, числа, сроки, гарантии и цены бери только из единственного блока источника ниже "
+    "(поле материала клиники) или из явно переданных structured facts в том же сообщении. "
+    "Не используй историю диалога и любой контекст вне этого блока как источник фактов — "
+    "они только для понимания формулировки вопроса."
+)
+
 EMPATHY_ADDON = (
     "В начале ответа добавь одну короткую живую фразу — "
     "покажи что понимаешь ситуацию человека. "
@@ -318,7 +326,40 @@ def _doc_key(md_file: str, meta: dict) -> str:
     return meta.get("doc_id") or md_file
 
 
-def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id: str, *, force_text: bool = False):
+def normalize_generator_sources(sources: object) -> list[dict] | None:
+    """Ровно один источник с непустым ref и content. Иначе None (без вызова LLM)."""
+    if not isinstance(sources, list) or len(sources) != 1:
+        return None
+    s0 = sources[0]
+    if not isinstance(s0, dict):
+        return None
+    ref = str(s0.get("ref") or "").strip()
+    content = str(s0.get("content") or "").strip()
+    if not ref or not content:
+        return None
+    out = {
+        "ref": ref,
+        "content": content,
+        "doc_id": s0.get("doc_id"),
+        "doc_type": s0.get("doc_type"),
+        "subtype": s0.get("subtype"),
+    }
+    return [out]
+
+
+def build_messages_for_gpt(
+    user_q: str,
+    sources: list[dict],
+    meta: dict,
+    session_id: str,
+    *,
+    force_text: bool = False,
+    dialog_context_for_understanding: str | None = None,
+):
+    norm = normalize_generator_sources(sources)
+    if norm is None:
+        raise ValueError("sources must be a list of length 1 with non-empty ref and content")
+
     doc_key = _doc_key(
         meta.get("md_file") or meta.get("source") or meta.get("title", ""),
         meta,
@@ -326,21 +367,30 @@ def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id:
     allow_empathy = bool(EMPATHY_ON and meta.get("empathy_enabled"))
     first_in_topic = is_first_in_topic(session_id, doc_key)
     use_empathy = bool(allow_empathy and first_in_topic)
-    system_prompt = BASE_SYSTEM + (EMPATHY_ADDON if use_empathy else "")
+    system_prompt = BASE_SYSTEM + GENERATOR_SINGLE_SOURCE_RULE + (EMPATHY_ADDON if use_empathy else "")
     if CHAT_JSON_MODE and not force_text:
         system_prompt += JSON_ANSWER_RULE
 
+    src0 = norm[0]
+    dialog_block = ""
+    dctx = (dialog_context_for_understanding or "").strip()
+    if dctx:
+        dialog_block = (
+            "Контекст диалога (не источник фактов, только для понимания продолжения диалога):\n"
+            f"{dctx}\n\n"
+        )
+
+    user_content = (
+        f"{dialog_block}"
+        "Вопрос пациента:\n"
+        f"{(user_q or '').strip()}\n\n"
+        f"Единственный источник ответа (ref={src0['ref']}):\n"
+        f"{src0['content']}"
+    )
+
     messages = [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": (
-                "Вопрос пациента:\n"
-                + user_q.strip()
-                + "\n\nКонтент для ответа (markdown, цитируй по смыслу, не выдумывай):\n"
-                + context_md.strip()
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
 
     meta["_empathy_used"] = use_empathy
@@ -351,19 +401,30 @@ def build_messages_for_gpt(user_q: str, context_md: str, meta: dict, session_id:
 
 
 def generate_answer_with_empathy(
-    user_q: str, context_md: str, meta: dict, session_id: str
+    user_q: str, sources: list[dict], meta: dict, session_id: str
 ) -> tuple[str, dict]:
     mem_txt, profile = mem_context(session_id)
+    norm = normalize_generator_sources(sources)
+    if norm is None:
+        log_json(
+            logger,
+            "llm_generate_skipped_invalid_sources",
+            sid=session_id,
+            generator_input={"source_count": 0, "source_ref": None},
+        )
+        return LLM_FALLBACK_ANSWER, profile
+
+    dialog_ctx = ""
+    if mem_txt and MEMORY_ON:
+        dialog_ctx = mem_txt.replace("Недавний диалог:", "").strip()
 
     messages, use_empathy, doc_key = build_messages_for_gpt(
-        user_q, context_md, meta, session_id
+        user_q,
+        norm,
+        meta,
+        session_id,
+        dialog_context_for_understanding=dialog_ctx or None,
     )
-
-    if mem_txt and MEMORY_ON:
-        for msg in messages:
-            if msg["role"] == "user":
-                msg["content"] = f"{mem_txt}\n\n" + msg["content"]
-                break
 
     kwargs = dict(model=CHAT_MODEL, temperature=0.3, messages=messages)
     if CHAT_JSON_MODE:
@@ -390,6 +451,10 @@ def generate_answer_with_empathy(
             model_used=CHAT_MODEL,
             empathy_used=bool(use_empathy),
             used_fallback=bool(answer == LLM_FALLBACK_ANSWER),
+            generator_input={
+                "source_ref": norm[0]["ref"],
+                "source_count": 1,
+            },
         )
     except Exception as e:
         log_llm_error(logger, call_type="chat_answer", err=str(e), model=CHAT_MODEL)
@@ -407,7 +472,7 @@ def generate_answer_with_empathy(
     return answer, profile
 
 
-def generate_answer_stream(user_q: str, context_md: str, meta: dict, session_id: str):
+def generate_answer_stream(user_q: str, sources: list[dict], meta: dict, session_id: str):
     """Generator для стриминга ответа.
 
     Yields:
@@ -415,14 +480,29 @@ def generate_answer_stream(user_q: str, context_md: str, meta: dict, session_id:
         ("done", (str, dict))     — финальный накопленный текст + profile
     """
     mem_txt, profile = mem_context(session_id)
-    messages, use_empathy, doc_key = build_messages_for_gpt(
-        user_q, context_md, meta, session_id, force_text=True
-    )
+    norm = normalize_generator_sources(sources)
+    if norm is None:
+        log_json(
+            logger,
+            "llm_generate_stream_skipped_invalid_sources",
+            sid=session_id,
+            generator_input={"source_count": 0, "source_ref": None},
+        )
+        yield ("done", (LLM_FALLBACK_ANSWER, profile))
+        return
+
+    dialog_ctx = ""
     if mem_txt and MEMORY_ON:
-        for msg in messages:
-            if msg["role"] == "user":
-                msg["content"] = f"{mem_txt}\n\n" + msg["content"]
-                break
+        dialog_ctx = mem_txt.replace("Недавний диалог:", "").strip()
+
+    messages, use_empathy, doc_key = build_messages_for_gpt(
+        user_q,
+        norm,
+        meta,
+        session_id,
+        force_text=True,
+        dialog_context_for_understanding=dialog_ctx or None,
+    )
 
     full_text = ""
     stream_usage = None
@@ -465,6 +545,10 @@ def generate_answer_stream(user_q: str, context_md: str, meta: dict, session_id:
             sid=session_id,
             model_used=CHAT_MODEL,
             empathy_used=bool(use_empathy),
+            generator_input={
+                "source_ref": norm[0]["ref"],
+                "source_count": 1,
+            },
         )
     except Exception as e:
         log_llm_error(logger, call_type="chat_answer_stream", err=str(e), model=CHAT_MODEL)

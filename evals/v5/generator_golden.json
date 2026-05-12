@@ -1,30 +1,226 @@
 [
   {
-    "id": "g1_faithfulness_basic",
+    "id": "g_faith_pain_01",
     "source_ref": "implantation__faq__pain.md#korotko",
-    "source_text": "Имплантация проводится под анестезией. Дискомфорт возможен, но врач подбирает обезболивание индивидуально.",
-    "answer": "Имплантация проводится под анестезией. Возможен дискомфорт, а врач подберёт обезболивание индивидуально.",
-    "expected": {
-      "faithful": true
-    }
+    "source_text": "Имплантация проводится под анестезией. Дискомфорт возможен.",
+    "answer": "Имплантация проводится под анестезией, дискомфорт возможен, но врач контролирует ощущения.",
+    "expected": { "faithful": true }
   },
   {
-    "id": "g2_hallucinated_fact",
-    "source_ref": "clinic__info__warranty.md#korotko",
-    "source_text": "Условия гарантии обсуждаются индивидуально и фиксируются в документах.",
-    "answer": "Гарантия 5 лет на все импланты.",
-    "expected": {
-      "faithful": false
-    }
+    "id": "g_faith_pain_02",
+    "source_ref": "implantation__faq__pain.md#korotko",
+    "source_text": "Имплантация проводится под анестезией. Дискомфорт возможен. Дополнительно: консультация бесплатна.",
+    "answer": "Имплантация проводится под анестезией, возможен дискомфорт. Консультация перед процедурой бесплатна.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_faith_duration_minutes",
+    "source_ref": "implantation__faq__duration.md#korotko",
+    "source_text": "Установка одного импланта занимает 20–30 минут. Полный курс лечения зависит от ситуации.",
+    "answer": "Установка одного импланта обычно занимает 20–30 минут, а общий курс лечения зависит от вашей ситуации.",
+    "expected": { "faithful": true }
   },
   {
-    "id": "g3_no_numbers_added",
+    "id": "g_faith_duration_months",
+    "source_ref": "implantation__faq__duration.md#korotko",
+    "source_text": "При классической имплантации полный срок лечения составляет от 3 до 6 месяцев.",
+    "answer": "При классической имплантации весь курс занимает от 3 до 6 месяцев.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_faith_price_rub",
     "source_ref": "implantation__pricing__implants.md#korotko",
-    "source_text": "Стоимость зависит от плана лечения и подбирается на консультации.",
-    "answer": "Стоимость зависит от плана лечения и подбирается на консультации.",
-    "expected": {
-      "faithful": true
-    }
+    "source_text": "Классическая имплантация от 70 000 руб. за зуб по акции.",
+    "answer": "Классическая имплантация стоит от 70 000 руб. за зуб по акции.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_faith_price_ruble_sign",
+    "source_ref": "implantation__pricing__implants.md#korotko",
+    "source_text": "All-on-4 от 250 000 ₽ за челюсть.",
+    "answer": "Для протезирования All-on-4 цена начинается от 250 000 ₽ за одну челюсть.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_faith_percent_plain",
+    "source_ref": "clinic__info__warranty.md#korotko",
+    "source_text": "Статистика приживления имплантов в клинике около 98%.",
+    "answer": "В нашей клинике статистика приживления имплантов около 98%.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_faith_percent_decimal_comma",
+    "source_ref": "clinic__info__warranty.md#korotko",
+    "source_text": "По внутренним данным, успешность лечения держится на уровне 99,8%.",
+    "answer": "По нашим данным, успешность лечения держится на уровне 99,8%.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_faith_days",
+    "source_ref": "implantation__faq__healing.md#korotko",
+    "source_text": "Острый дискомфорт после операции обычно проходит за 2–3 дня.",
+    "answer": "Острый дискомфорт после имплантации обычно уходит за 2–3 дня.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_faith_sutki",
+    "source_ref": "implantation__faq__healing.md#korotko",
+    "source_text": "Отёк мягких тканей может держаться до 3 суток.",
+    "answer": "Небольшой отёк мягких тканей может сохраняться до 3 суток.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_faith_years",
+    "source_ref": "clinic__info__implants.md#korotko",
+    "source_text": "При правильном уходе импланты служат 10–15 лет и дольше.",
+    "answer": "При хорошем уходе импланты могут служить 10–15 лет и дольше.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_faith_warranty_text",
+    "source_ref": "clinic__info__warranty.md#korotko",
+    "source_text": "Условия гарантии обсуждаются индивидуально на консультации.",
+    "answer": "Условия гарантии обсуждаются индивидуально на консультации.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_unfaithful_rub_sign",
+    "source_ref": "x_price_unknown.md#korotko",
+    "source_text": "Цена обсуждается на очной консультации, точная стоимость зависит от плана лечения.",
+    "answer": "Полное лечение обойдётся в 120 000 ₽ за всё.",
+    "expected": { "faithful": false }
+  },
+  {
+    "id": "g_unfaithful_rub_words",
+    "source_ref": "x_price_unknown.md#korotko",
+    "source_text": "Консультация бесплатна, стоимость процедур рассчитывается индивидуально.",
+    "answer": "Консультация бесплатна, а лечение стоит 30 000 рублей.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_unfaithful_percent_plain",
+    "source_ref": "x_success_unknown.md#korotko",
+    "source_text": "Результат зависит от состояния зубов и кости.",
+    "answer": "Успех лечения в 99% случаев.",
+    "expected": { "faithful": false }
+  },
+  {
+    "id": "g_unfaithful_percent_decimal",
+    "source_ref": "x_success_unknown.md#korotko",
+    "source_text": "Мы не приводим точные проценты эффективности в открытых материалах.",
+    "answer": "По статистике, успешность 99,8%.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_unfaithful_100_safe",
+    "source_ref": "x_safety.md#korotko",
+    "source_text": "Процедура стандартная, риски минимальны и обсуждаются с врачом.",
+    "answer": "Процедура 100% безопасна для всех пациентов.",
+    "expected": { "faithful": false }
+  },
+  {
+    "id": "g_unfaithful_absolute",
+    "source_ref": "x_safety.md#korotko",
+    "source_text": "Есть стандартные риски, которые врач объясняет перед началом лечения.",
+    "answer": "Имплантация абсолютно безопасна, никаких рисков нет.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_unfaithful_years",
+    "source_ref": "x_warranty_general.md#korotko",
+    "source_text": "Гарантия оформляется по договору, её срок зависит от вида работы.",
+    "answer": "Мы даём гарантию 5 лет на всё лечение.",
+    "expected": { "faithful": false }
+  },
+  {
+    "id": "g_unfaithful_lifetime",
+    "source_ref": "x_warranty_general.md#korotko",
+    "source_text": "Гарантийные обязательства прописываются в документах.",
+    "answer": "На импланты действует пожизненная гарантия.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_unfaithful_days",
+    "source_ref": "x_pain_unknown.md#korotko",
+    "source_text": "После операции возможен дискомфорт, его длительность индивидуальна.",
+    "answer": "Боль полностью уйдёт за 1–3 дня.",
+    "expected": { "faithful": false }
+  },
+  {
+    "id": "g_unfaithful_months",
+    "source_ref": "x_duration_unknown.md#korotko",
+    "source_text": "Сроки лечения зависят от объёма вмешательства и регенерации.",
+    "answer": "Обычно лечение занимает 3–4 месяца.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_faith_no_numbers",
+    "source_ref": "clinic__info__about.md#korotko",
+    "source_text": "Клиника специализируется на имплантации и протезировании, работаем по предварительной записи.",
+    "answer": "Мы специализируемся на имплантации и протезировании и работаем по предварительной записи.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_unfaithful_injected_number",
+    "source_ref": "clinic__info__about.md#korotko",
+    "source_text": "Клиника специализируется на имплантации и протезировании, работаем по предварительной записи.",
+    "answer": "В день мы принимаем 200 пациентов, запись только заранее.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_faith_price_range_rub",
+    "source_ref": "implantation__pricing__single_tooth.md#korotko",
+    "source_text": "Имплантация одного зуба стоит от 60 000 до 80 000 руб. в зависимости от ситуации.",
+    "answer": "Имплантация одного зуба стоит от 60 000 до 80 000 руб. в зависимости от ситуации.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_unfaithful_price_range_rub",
+    "source_ref": "implantation__pricing__single_tooth.md#korotko",
+    "source_text": "Имплантация одного зуба стоит от 60 000 до 80 000 руб. в зависимости от ситуации.",
+    "answer": "Имплантация одного зуба стоит около 100 000 руб.",
+    "expected": { "faithful": false }
+  },
+
+  {
+    "id": "g_faith_healing_days_exact",
+    "source_ref": "implantation__faq__healing.md#h3-reabilitaciya",
+    "source_text": "Период восстановления после удаления зуба обычно составляет 1–3 дня. Отёк и дискомфорт проходят самостоятельно.",
+    "answer": "После удаления зуба восстановление занимает 1–3 дня: отёк и дискомфорт уходят сами.",
+    "expected": { "faithful": true }
+  },
+  {
+    "id": "g_faith_osseo_months",
+    "source_ref": "implantation__faq__osseointegration.md#korotko",
+    "source_text": "Остеоинтеграция импланта занимает от 3 до 4 месяцев в зависимости от состояния кости.",
+    "answer": "Приживление импланта занимает от 3 до 4 месяцев — точный срок зависит от состояния кости.",
+    "expected": { "faithful": true }
+  },
+
+  {
+    "id": "g_unfaithful_days_hallucinated",
+    "source_ref": "x_healing_vague.md#korotko",
+    "source_text": "После операции пациент получает рекомендации по уходу. Сроки восстановления индивидуальны.",
+    "answer": "Полное восстановление займёт 1–3 дня.",
+    "expected": { "faithful": false }
+  },
+  {
+    "id": "g_unfaithful_months_hallucinated",
+    "source_ref": "x_osseo_vague.md#korotko",
+    "source_text": "Срок приживления обсуждается с врачом, точные данные зависят от случая.",
+    "answer": "Имплант приживается за 3–4 месяца.",
+    "expected": { "faithful": false }
   }
 ]
-
