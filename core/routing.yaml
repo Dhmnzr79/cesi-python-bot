@@ -10,6 +10,12 @@ arbiter:
 
 verifier:
   min_confidence: 0.7
+  # Таймаут одного LLM-вызова A7 (сек). Источник истины — YAML, не константы в коде.
+  timeout_sec: 12
+  # Максимум параллельных shadow-вызовов A7 (воркеры пула).
+  max_concurrent_shadow: 4
+  # Доп. слотов «в полёте» (ожидают воркер) поверх max_concurrent_shadow; при переполнении — drop + telemetry.
+  shadow_backlog_max: 16
 
 retrieval:
   scope_topic_min_confidence: 0.6

@@ -6,6 +6,7 @@ import inspect
 import json
 import threading
 from datetime import datetime, timezone
+from typing import Any
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -90,6 +91,13 @@ from ux_builder import (
 def _is_resolver_bypassed_env() -> bool:
     """PR #1.2: emergency v4 path — only exact ``RESOLVER_OFF=1``."""
     return os.environ.get("RESOLVER_OFF") == "1"
+
+
+def _verifier_trace_flat(v: Any) -> dict[str, Any]:
+    """Поля A7 для bot_event details (без лишних ключей)."""
+    if not isinstance(v, dict):
+        return {}
+    return {k: val for k, val in v.items() if str(k).startswith("verifier_")}
 
 
 def _enqueue_v5_resolver_trace(
@@ -778,6 +786,7 @@ def finalize_ask(
             "route": effective_route,
             "resolver_used": bool(request.ctx.get("resolver_used")),
             "safety_net_used": bool(request.ctx.get("safety_net_used")),
+            **(_verifier_trace_flat(request.ctx.get("verifier_turn"))),
         },
     )
     if turn_meta and turn_meta.get("interaction") == "user_message":
@@ -815,6 +824,7 @@ def finalize_ask(
                 "legacy_intent": request.ctx.get("legacy_intent"),
                 "effective_intent": str(request.ctx.get("effective_intent") or ""),
                 "source_route_decision": request.ctx.get("source_route_decision"),
+                **_verifier_trace_flat(request.ctx.get("verifier_turn")),
             },
         )
     cta = payload.get("cta")

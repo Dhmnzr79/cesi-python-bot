@@ -9,6 +9,7 @@ from typing import Any, Callable
 import session as session_mod
 from llm import LLM_FALLBACK_ANSWER, generate_answer_stream, generate_answer_with_empathy
 from logging_setup import log_json
+from verifier import build_turn_trace_prefix, schedule_verifier_shadow_if_needed
 from meta_loader import get_doc_meta
 from policy import apply_response_policy
 from session import (
@@ -148,6 +149,20 @@ def _append_generator_append_text(answer: str, append_text: str | None) -> str:
     return f"{base}\n\n{at}" if base else at
 
 
+def verifier_effective_source_body(*, chunk_md_body: str, generator_append_text: str | None) -> str:
+    """Текст «разрешённых фактов» для A7: чанк + детерминированный хвост (цены и т.д.), если был."""
+    base = (chunk_md_body or "").strip()
+    at = (generator_append_text or "").strip()
+    if not at:
+        return base
+    return (
+        f"{base}\n\n---\n"
+        "Ниже — детерминированное дополнение к ответу пользователю (не из LLM-генератора по чанку). "
+        "Для verifier это часть разрешённого контекста фактов наравне с основным источником:\n\n"
+        f"{at}"
+    )
+
+
 def ensure_answer(answer: str, chunk: dict) -> str:
     if isinstance(answer, str) and answer.strip():
         return answer
@@ -276,6 +291,34 @@ def respond_from_chunk(
     if payload.get("cta") and doc_id:
         set_cta_shown(sid, doc_id, shown=True)
 
+    verifier_src = verifier_effective_source_body(
+        chunk_md_body=str(s0.get("content") or ""),
+        generator_append_text=generator_append_text,
+    )
+    v_trace = build_turn_trace_prefix(
+        answer=answer,
+        source_ref=str(generator_input.get("source_ref") or ""),
+        source_text=verifier_src,
+    )
+    v_trace["verifier_source_has_deterministic_append"] = bool((generator_append_text or "").strip())
+    try:
+        from flask import has_request_context, request
+
+        if has_request_context():
+            request.ctx["verifier_turn"] = v_trace
+    except Exception:
+        pass
+    schedule_verifier_shadow_if_needed(
+        answer=answer,
+        source_text=verifier_src,
+        source_ref=str(generator_input.get("source_ref") or ""),
+        sid=sid,
+        client_id=client_id,
+        route=route,
+        logger_=logger,
+        trace_prefix=v_trace,
+    )
+
     log_json(
         logger,
         log_event,
@@ -283,6 +326,8 @@ def respond_from_chunk(
         score=round(float(chunk.get("_score", 0.0)), 3),
         answer_length=len(answer),
         generator_input=generator_input,
+        verifier_triggered=v_trace.get("verifier_triggered"),
+        verifier_trigger_reason=v_trace.get("verifier_trigger_reason"),
     )
     qs = (q or "").strip()
     turn_meta = (
@@ -426,6 +471,34 @@ def respond_from_chunk_stream(
     if payload.get("cta") and doc_id:
         set_cta_shown(sid, doc_id, shown=True)
 
+    verifier_src = verifier_effective_source_body(
+        chunk_md_body=str(s0.get("content") or ""),
+        generator_append_text=generator_append_text,
+    )
+    v_trace = build_turn_trace_prefix(
+        answer=answer,
+        source_ref=str(generator_input.get("source_ref") or ""),
+        source_text=verifier_src,
+    )
+    v_trace["verifier_source_has_deterministic_append"] = bool((generator_append_text or "").strip())
+    try:
+        from flask import has_request_context, request
+
+        if has_request_context():
+            request.ctx["verifier_turn"] = v_trace
+    except Exception:
+        pass
+    schedule_verifier_shadow_if_needed(
+        answer=answer,
+        source_text=verifier_src,
+        source_ref=str(generator_input.get("source_ref") or ""),
+        sid=sid,
+        client_id=client_id,
+        route=route,
+        logger_=logger,
+        trace_prefix=v_trace,
+    )
+
     log_json(
         logger,
         log_event,
@@ -433,6 +506,8 @@ def respond_from_chunk_stream(
         score=round(float(chunk.get("_score", 0.0)), 3),
         answer_length=len(answer),
         generator_input=generator_input,
+        verifier_triggered=v_trace.get("verifier_triggered"),
+        verifier_trigger_reason=v_trace.get("verifier_trigger_reason"),
     )
     qs = (q or "").strip()
     turn_meta = (

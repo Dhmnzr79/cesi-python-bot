@@ -311,10 +311,115 @@ def _generator_faithfulness_violations(source_text: str, answer: str) -> list[st
 
 def eval_verifier() -> EvalResult:
     cases = _load_json(_here("verifier_golden.json"))
+    try:
+        from verifier import collect_high_risk_signals, verify_answer_structured
+    except Exception as e:
+        return EvalResult(
+            layer="verifier",
+            status="SKIP",
+            details={"cases": len(cases), "reason": f"verifier_import_failed: {str(e)[:200]}"},
+        )
+
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return EvalResult(
+            layer="verifier",
+            status="SKIP",
+            details={"cases": len(cases), "reason": "no_openai_api_key"},
+        )
+
+    total = 0
+    ok = 0
+    bad: list[dict[str, Any]] = []
+
+    for row in cases:
+        cid = str(row.get("id") or "")
+        src = str(row.get("source_snippet") or "")
+        ans = str(row.get("answer") or "")
+        exp = row.get("expected") or {}
+        if not isinstance(exp, dict) or not ans.strip():
+            continue
+        want_g = exp.get("grounded")
+        want_tr = exp.get("triggered")
+        if want_g is None and want_tr is None:
+            continue
+
+        signals = collect_high_risk_signals(ans)
+        triggered = len(signals) > 0
+        if want_tr is not None and bool(want_tr) != triggered:
+            total += 1
+            bad.append(
+                {
+                    "id": cid,
+                    "error": "trigger_mismatch",
+                    "expected_triggered": bool(want_tr),
+                    "got_triggered": triggered,
+                    "signals": signals,
+                }
+            )
+            continue
+
+        if not triggered:
+            total += 1
+            if want_g is False:
+                bad.append(
+                    {
+                        "id": cid,
+                        "error": "expected_not_grounded_but_no_high_risk_trigger",
+                        "answer_preview": ans[:120],
+                    }
+                )
+            else:
+                ok += 1
+            continue
+
+        total += 1
+        ref = f"eval#{cid}"
+        verdict, run_st, err = verify_answer_structured(answer=ans, source_snippet=src, source_ref=ref, call_type="v5_verifier_eval")
+        if run_st != "ok" or verdict is None:
+            bad.append(
+                {
+                    "id": cid,
+                    "error": f"verifier_call:{run_st}",
+                    "detail": err,
+                    "answer_preview": ans[:120],
+                }
+            )
+            continue
+
+        if want_g is None:
+            ok += 1
+            continue
+
+        g = bool(verdict.grounded)
+        if g == bool(want_g):
+            ok += 1
+        else:
+            bad.append(
+                {
+                    "id": cid,
+                    "expected_grounded": bool(want_g),
+                    "got_grounded": g,
+                    "confidence": verdict.confidence,
+                    "facts": verdict.hallucinated_facts[:5],
+                }
+            )
+
+    if total == 0:
+        return EvalResult(layer="verifier", status="SKIP", details={"cases": 0, "reason": "no_cases"})
+
+    acc = ok / total
+    status: Literal["OK", "FAIL"] = "OK" if acc >= 0.75 else "FAIL"
     return EvalResult(
         layer="verifier",
-        status="SKIP",
-        details={"cases": len(cases), "reason": "verifier_not_implemented_yet"},
+        status=status,
+        details={
+            "cases": total,
+            "ok": ok,
+            "accuracy": round(acc, 4),
+            "accuracy_note": "trigger must match expected; if triggered, LLM grounded must match expected (shadow quality)",
+            "bad_examples": bad[:25],
+        },
     )
 
 

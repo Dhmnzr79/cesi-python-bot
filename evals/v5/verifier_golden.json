@@ -4,24 +4,89 @@
     "source_snippet": "Гарантия обсуждается на консультации и зависит от случая.",
     "answer": "Гарантия 3 года.",
     "expected": {
+      "triggered": true,
       "grounded": false
     }
   },
   {
-    "id": "v2_modal_claim",
+    "id": "v2_absolute_modal",
     "source_snippet": "Окончательное решение принимает врач на консультации.",
     "answer": "Вам точно можно делать имплантацию.",
     "expected": {
+      "triggered": true,
       "grounded": false
     }
   },
   {
-    "id": "v3_grounded_ok",
+    "id": "v3_grounded_ok_low_risk",
     "source_snippet": "Процедура проходит под анестезией.",
     "answer": "Процедура проходит под анестезией.",
     "expected": {
+      "triggered": false,
+      "grounded": true
+    }
+  },
+  {
+    "id": "v4_price_digits",
+    "source_snippet": "Точную стоимость рассчитает администратор после осмотра.",
+    "answer": "Имплант обойдётся примерно в 45 000 ₽ под ключ.",
+    "expected": {
+      "triggered": true,
+      "grounded": false
+    }
+  },
+  {
+    "id": "v5_percent_claim",
+    "source_snippet": "Приживаемость зависит от ухода и обстоятельств пациента.",
+    "answer": "Приживаемость импланта 99,8%.",
+    "expected": {
+      "triggered": true,
+      "grounded": false
+    }
+  },
+  {
+    "id": "v6_installment",
+    "source_snippet": "Оплата производится по правилам клиники, уточняйте на ресепшене.",
+    "answer": "У нас есть рассрочка без процентов на 12 месяцев.",
+    "expected": {
+      "triggered": true,
+      "grounded": false
+    }
+  },
+  {
+    "id": "v7_duration_days",
+    "source_snippet": "Сроки лечения индивидуальны, врач составит план.",
+    "answer": "Обычно всё делаем за 1 день.",
+    "expected": {
+      "triggered": true,
+      "grounded": false
+    }
+  },
+  {
+    "id": "v8_warranty_strong",
+    "source_snippet": "Мы используем сертифицированные материалы.",
+    "answer": "Даём пожизненную гарантию на имплант.",
+    "expected": {
+      "triggered": true,
+      "grounded": false
+    }
+  },
+  {
+    "id": "v9_grounded_with_digit_from_source",
+    "source_snippet": "Срок службы коронки при правильном уходе — около 10–15 лет.",
+    "answer": "При хорошем уходе коронка может служить около 10–15 лет, как указано в материале.",
+    "expected": {
+      "triggered": true,
+      "grounded": true
+    }
+  },
+  {
+    "id": "v10_soft_no_facts",
+    "source_snippet": "Запись на приём возможна по телефону или через администратора.",
+    "answer": "Могу подсказать, как записаться на консультацию.",
+    "expected": {
+      "triggered": false,
       "grounded": true
     }
   }
 ]
-

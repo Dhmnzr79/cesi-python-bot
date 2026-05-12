@@ -34,6 +34,9 @@ class VerifierThresholds(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_confidence: float = Field(..., ge=0.0, le=1.0)
+    timeout_sec: float = Field(..., ge=1.0, le=120.0)
+    max_concurrent_shadow: int = Field(..., ge=1, le=32)
+    shadow_backlog_max: int = Field(..., ge=0, le=256)
 
 
 class RetrievalThresholds(BaseModel):

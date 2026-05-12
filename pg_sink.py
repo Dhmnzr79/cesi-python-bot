@@ -224,6 +224,41 @@ def _insert_v5_turn_trace(conn, row: dict) -> None:
         )
 
 
+def _upsert_v5_verifier_shadow(conn, row: dict) -> None:
+    """Дописать/обновить JSONB verifier_verdict по turn_id (без затирания resolver-полей)."""
+    from psycopg.types.json import Json
+
+    tid = str(row.get("turn_id") or "").strip()
+    if not tid:
+        return
+    vj = row.get("verifier_verdict")
+    if not isinstance(vj, dict):
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO v5_turn_traces (
+                turn_id, ts, sid, client_id, request_id,
+                gate_traces, retrieval_candidates, errors,
+                verifier_verdict
+            )
+            VALUES (%s, %s, %s, %s, %s, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, %s)
+            ON CONFLICT (turn_id) DO UPDATE SET
+                verifier_verdict = EXCLUDED.verifier_verdict,
+                ts = EXCLUDED.ts
+            ;
+            """,
+            (
+                tid,
+                _parse_ts(row.get("ts")),
+                row.get("sid"),
+                row.get("client_id"),
+                row.get("request_id") or tid,
+                Json(vj),
+            ),
+        )
+
+
 def _insert_bot_event(conn, row: dict) -> None:
     from psycopg.types.json import Json
 
@@ -304,6 +339,8 @@ def _worker() -> None:
                             _insert_lead(conn, payload)
                         elif kind == "v5_turn_trace":
                             _insert_v5_turn_trace(conn, payload)
+                        elif kind == "v5_verifier_shadow":
+                            _upsert_v5_verifier_shadow(conn, payload)
                     except Exception as e:
                         _log(
                             "warning",
@@ -380,4 +417,9 @@ def enqueue_lead(row: dict) -> None:
 def enqueue_v5_turn_trace(row: dict) -> None:
     """Append/update one row in v5_turn_traces (Resolver slice for PR #1.2)."""
     _enqueue("v5_turn_trace", row)
+
+
+def enqueue_v5_verifier_shadow(row: dict) -> None:
+    """PR #1.9: merge shadow Verifier payload into v5_turn_traces.verifier_verdict (ON CONFLICT UPDATE)."""
+    _enqueue("v5_verifier_shadow", row)
 
