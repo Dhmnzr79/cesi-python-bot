@@ -3,6 +3,38 @@
 const STORAGE_SID = "clinic_widget_sid";
 const DEFAULT_AVATAR_URL = "/static/avatar.png";
 
+const WELCOME_CHAR_MS = 32;
+const WELCOME_STREAM_START_MS = 280;
+const WELCOME_LEAVE_MS = 240;
+const TEXTAREA_MAX_HEIGHT = 112;
+const SCROLL_NEAR_BOTTOM_PX = 80;
+
+const SEND_BTN_SVG = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+const LINK_CHEVRON_SVG = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+const CTA_CHAT_SVG = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/></svg>`;
+
+const CTA_CALENDAR_SVG = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.75"/><path d="M8 3v4M16 3v4M3 10h18" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>`;
+
+const WELCOME_LOGO_SVG = `<svg viewBox="0 0 370 371" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_clinic_welcome_logo)">
+<path d="M185.5 22.8296C153.376 22.8296 121.974 32.3553 95.2641 50.2023C68.5543 68.0492 47.7365 93.4158 35.4433 123.094C23.1501 152.773 19.9337 185.43 26.2007 216.936C32.4677 248.443 47.9367 277.383 70.6516 300.098C93.3664 322.813 122.307 338.282 153.813 344.549C185.32 350.816 217.977 347.599 247.655 335.306C277.334 323.013 302.7 302.195 320.547 275.485C338.394 248.775 347.92 217.373 347.92 185.25C347.92 163.92 343.719 142.8 335.556 123.094C327.394 103.388 315.43 85.4834 300.348 70.4013C285.266 55.3192 267.361 43.3554 247.655 35.1931C227.95 27.0307 206.829 22.8296 185.5 22.8296ZM289.11 267.75C307.22 180.15 271.61 118.48 229.67 122.75C186.67 127.08 190.84 172.26 196.79 190.87C182.65 180.45 142.2 157.12 121.85 184.87C84.8998 235.35 178.68 305.48 233.77 315.41C170.73 306.97 94.0498 264.75 61.9998 202.5C30.9998 142.16 83.6298 96.7496 131 92.5596C120.53 111.96 112.88 122.67 102.46 133.26C133.76 118.12 147.42 81.1396 162.3 67.7496C177.18 54.3596 211.18 31.0196 256.85 74.1996C305.08 119.81 308.71 226.57 289.11 267.75ZM185.5 370.75C142.706 370.721 101.238 355.901 68.1186 328.801C34.9995 301.7 12.266 263.985 3.76869 222.043C-4.72861 180.101 1.53269 136.512 21.492 98.6577C41.4514 60.8036 73.8817 31.0122 113.29 14.3296C158.568 -4.53136 209.472 -4.69727 254.871 13.8681C300.271 32.4335 336.473 68.2197 355.562 113.402C374.65 158.584 375.072 209.487 356.736 254.98C338.399 300.472 302.796 336.854 257.71 356.17C234.865 365.835 210.305 370.794 185.5 370.75ZM185.5 5.74958C86.4998 5.74958 5.99984 86.2496 5.99984 185.25C5.99984 284.25 86.4998 364.75 185.5 364.75C284.5 364.75 365 284.25 365 185.25C365 86.2496 284.5 5.74958 185.5 5.74958Z" fill="#23BFCF"/>
+<path d="M229.67 122.75C186.67 127.08 190.84 172.26 196.79 190.87C182.65 180.45 142.2 157.12 121.85 184.87C102.99 210.62 118.18 241.49 144.9 266.87C198.49 237.96 240.79 198.87 272.72 145.03C261.14 129.3 245.88 121.08 229.67 122.75Z" fill="#68CBD8"/>
+<path d="M5.99984 185.25C5.99984 86.2498 86.4998 5.7498 185.5 5.7498C232.679 5.70854 277.965 24.3045 311.5 57.4898C312.19 55.3598 312.86 53.1998 313.5 51.0298C279.021 18.2101 233.245 -0.0990757 185.644 -0.109371C138.042 -0.119665 92.2585 18.1697 57.7657 50.9745C23.2729 83.7793 2.71117 128.589 0.334976 176.131C-2.04122 223.673 13.95 270.309 44.9998 306.39L51.4098 304.52C22.1185 271.702 5.95139 229.239 5.99984 185.25Z" fill="#68CBD8"/>
+<path d="M185.5 22.8297C153.525 22.8356 122.262 32.2799 95.6324 49.9789C69.0023 67.6778 48.1892 92.8437 35.802 122.322C23.4148 151.8 20.0048 184.279 25.9994 215.688C31.9939 247.096 47.1263 276.036 69.4997 298.88C90.0093 292.174 110.053 284.12 129.5 274.77C101.29 255.89 76.8697 231.36 61.9997 202.5C30.9997 142.16 83.6297 96.7497 131 92.5597C120.53 111.96 112.88 122.67 102.46 133.26C133.76 118.12 147.42 81.1397 162.3 67.7497C177.18 54.3597 211.18 31.0197 256.85 74.1997C269.53 86.1997 279.12 102.42 286.03 120.56C293.27 105.929 299.686 90.906 305.25 75.5597C290.053 58.9266 271.554 45.6462 250.935 36.5668C230.316 27.4874 208.029 22.8088 185.5 22.8297Z" fill="#68CBD8"/>
+</g>
+<defs>
+<clipPath id="clip0_clinic_welcome_logo">
+<rect width="370" height="371" fill="white"/>
+</clipPath>
+</defs>
+</svg>`;
+
+const WELCOME_STAR_SVG = `<svg viewBox="0 0 244 244" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+<path d="M243.838 121.919C168.164 147.46 147.459 168.164 121.919 243.838C96.3781 168.164 75.674 147.459 0 121.919C75.674 96.378 96.3791 75.673 121.919 0C147.459 75.674 168.164 96.379 243.838 121.919Z" fill="#23BFCF"/>
+</svg>`;
+
 /** @param {unknown} meta */
 function leadMetaPhoneStep(meta) {
   return Boolean(
@@ -102,6 +134,35 @@ function dismissLinksAll(messages) {
 }
 
 /**
+ * @param {string} avatarUrl
+ * @returns {HTMLElement}
+ */
+function createBotAvatarEl(avatarUrl) {
+  const wrap = document.createElement("div");
+  wrap.className = "clinic-row__avatar-wrap";
+  const av = document.createElement("img");
+  av.className = "clinic-row__avatar";
+  av.src = avatarUrl;
+  av.alt = "";
+  av.width = 38;
+  av.height = 38;
+  const dot = document.createElement("span");
+  dot.className = "clinic-row__avatar-online";
+  dot.setAttribute("aria-hidden", "true");
+  wrap.appendChild(av);
+  wrap.appendChild(dot);
+  return wrap;
+}
+
+function autoResizeTextarea(textarea) {
+  textarea.style.height = "auto";
+  const next = Math.min(textarea.scrollHeight, TEXTAREA_MAX_HEIGHT);
+  textarea.style.height = `${next}px`;
+  textarea.style.overflowY =
+    textarea.scrollHeight > TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+}
+
+/**
  * Создаёт «живую» bubble в feed перед typing-wrap и скрывает typing indicator.
  * Вызывается лениво — только при первом text_delta.
  * @param {HTMLElement} feed
@@ -113,18 +174,12 @@ function _createLiveBubble(feed, resolvedAvatarUrl) {
   const row = document.createElement("div");
   row.className = "clinic-row clinic-row--bot";
   row.setAttribute("data-live-bubble", "");
-  const av = document.createElement("img");
-  av.className = "clinic-row__avatar";
-  av.src = resolvedAvatarUrl;
-  av.alt = "";
-  av.width = 32;
-  av.height = 32;
   const bubble = document.createElement("div");
-  bubble.className = "clinic-msg clinic-msg--bot";
+  bubble.className = "clinic-msg clinic-msg--bot clinic-msg--bot--streaming";
   const body = document.createElement("div");
   body.className = "clinic-msg__body";
   bubble.appendChild(body);
-  row.appendChild(av);
+  row.appendChild(createBotAvatarEl(resolvedAvatarUrl));
   row.appendChild(bubble);
   feed.insertBefore(row, typingWrap);
   if (typingWrap) typingWrap.classList.remove("is-visible");
@@ -137,15 +192,67 @@ function _createLiveBubble(feed, resolvedAvatarUrl) {
  * @param {string} text
  * @param {HTMLElement} feed
  */
+/**
+ * @param {HTMLElement} feedEl
+ * @param {{ force?: boolean }} [opts]
+ */
+function scrollChatPaneToEnd(feedEl, opts = {}) {
+  const scroller = feedEl.closest(".clinic-shell__main");
+  if (!scroller) return;
+  if (!opts.force) {
+    const dist =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (dist >= SCROLL_NEAR_BOTTOM_PX) return;
+  }
+  scroller.scrollTop = scroller.scrollHeight;
+}
+
 function _updateLiveBubble(row, text, feed) {
   const body = row.querySelector(".clinic-msg__body");
   if (body) body.textContent = text;
-  feed.scrollTop = feed.scrollHeight;
+  scrollChatPaneToEnd(feed);
+}
+
+function isDevHost() {
+  const host = location.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return true;
+  if (new URLSearchParams(location.search).get("dev") === "1") return true;
+  return false;
+}
+
+/**
+ * Временно: кнопка сброса sid слева сверху (только dev-хост).
+ * @param {() => void} onReset
+ */
+function attachDevResetControl(onReset) {
+  if (!isDevHost()) return;
+  if (document.querySelector("[data-clinic-dev-reset]")) return;
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "clinic-dev-reset";
+  btn.setAttribute("data-clinic-dev-reset", "");
+  btn.textContent = "DEV · сброс sid";
+  btn.title = "Очистить sid и историю. Ctrl+Alt+R";
+  btn.addEventListener("click", onReset);
+  document.body.appendChild(btn);
+
+  if (!window.__clinicDevResetKeyBound) {
+    window.__clinicDevResetKeyBound = true;
+    document.addEventListener("keydown", (ev) => {
+      if (!isDevHost()) return;
+      if (ev.ctrlKey && ev.altKey && ev.key.toLowerCase() === "r") {
+        ev.preventDefault();
+        onReset();
+      }
+    });
+  }
 }
 
 /**
  * @param {HTMLElement} root
  * @param {WidgetConfig} config
+ * @returns {{ resetSession: () => void }}
  */
 export function mountWidget(root, config) {
   const apiBase = config.apiBase ?? "";
@@ -154,14 +261,106 @@ export function mountWidget(root, config) {
 
   const state = {
     isOpen: false,
-    isExpanded: false,
     messages: [],
     lastPayload: null,
     pending: false,
     unread: false,
     started: false,
     errorLine: "",
+    welcomeAnimActive: false,
+    welcomeStreamDone: false,
   };
+
+  let welcomeStreamTimer = 0;
+
+  function prefersReducedMotion() {
+    return (
+      typeof matchMedia !== "undefined" &&
+      matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  }
+
+  function clearWelcomeStream() {
+    if (welcomeStreamTimer) {
+      clearTimeout(welcomeStreamTimer);
+      welcomeStreamTimer = 0;
+    }
+  }
+
+  /**
+   * @param {HTMLParagraphElement} textP
+   * @param {HTMLElement} textBody
+   * @param {HTMLElement} cursor
+   * @param {HTMLElement} card
+   */
+  function finishWelcomeStream(textP, card) {
+    clearWelcomeStream();
+    state.welcomeAnimActive = false;
+    state.welcomeStreamDone = true;
+    textP.classList.remove("is-typing");
+    textP.classList.add("is-done");
+    card.classList.remove("is-streaming");
+  }
+
+  /**
+   * @param {HTMLParagraphElement} textP
+   * @param {HTMLElement} textBody
+   * @param {HTMLElement} card
+   * @param {number} [startAt]
+   */
+  function startWelcomeTextStream(textP, textBody, card, startAt = 0) {
+    const full = String(config.welcomeText || "").trim();
+    clearWelcomeStream();
+    state.welcomeAnimActive = true;
+    textP.classList.remove("is-done");
+    textP.classList.add("is-typing");
+    card.classList.add("is-streaming");
+
+    if (prefersReducedMotion() || !full) {
+      textBody.textContent = full;
+      finishWelcomeStream(textP, card);
+      return;
+    }
+
+    let i = Math.min(Math.max(0, startAt), full.length);
+    textBody.textContent = full.slice(0, i);
+
+    if (i >= full.length) {
+      finishWelcomeStream(textP, card);
+      return;
+    }
+
+    const step = () => {
+      welcomeStreamTimer = 0;
+      if (state.started || !state.isOpen) return;
+      if (i < full.length) {
+        textBody.textContent = full.slice(0, i + 1);
+        i += 1;
+        welcomeStreamTimer = window.setTimeout(step, WELCOME_CHAR_MS);
+      } else {
+        finishWelcomeStream(textP, card);
+      }
+    };
+    welcomeStreamTimer = window.setTimeout(step, WELCOME_STREAM_START_MS);
+  }
+
+  function maybeStartWelcomeStream() {
+    if (!state.isOpen || state.started || state.welcomeStreamDone || state.welcomeAnimActive) {
+      return;
+    }
+    const textP = feed.querySelector(".clinic-shell__welcome-text");
+    const textBody = feed.querySelector(".clinic-shell__welcome-text-body");
+    const card = feed.querySelector(".clinic-shell__welcome-card");
+    if (!textP || !textBody || !card) return;
+
+    const full = String(config.welcomeText || "").trim();
+    const startAt = (textBody.textContent || "").length;
+    if (startAt >= full.length && full.length > 0) {
+      finishWelcomeStream(textP, card);
+      return;
+    }
+    startWelcomeTextStream(textP, textBody, card, startAt);
+  }
 
   root.innerHTML = `
     <div class="clinic-shell" data-clinic-root>
@@ -176,28 +375,35 @@ export function mountWidget(root, config) {
         </span>
       </button>
       <div class="clinic-shell__panel" id="clinic-panel" role="dialog" aria-modal="true" aria-label="Чат" data-clinic-panel>
-        <header class="clinic-shell__header">
-          <div class="clinic-shell__header-main">
-            <span class="clinic-shell__avatar-fallback clinic-shell__avatar-fallback--sm" data-clinic-header-fb>
-              <img class="clinic-shell__avatar-fallback-img" alt="" width="36" height="36" data-clinic-header-avatar />
-            </span>
-            <span class="clinic-shell__launcher-text">
-              <span class="clinic-shell__name" data-clinic-header-name></span>
-              <span class="clinic-shell__online" data-clinic-header-online></span>
-            </span>
-          </div>
-          <div class="clinic-shell__header-actions">
-            <button type="button" class="clinic-shell__session-reset" data-clinic-reset-session title="Очистить sid и историю (временно для отладки)">Сброс</button>
-            <button type="button" class="clinic-btn-icon clinic-btn-ghost" data-clinic-expand aria-expanded="false" title="Шире">⤢</button>
-            <button type="button" class="clinic-btn-icon clinic-btn-ghost" data-clinic-close title="Свернуть">✕</button>
-          </div>
-        </header>
-        <div class="clinic-shell__feed" data-clinic-feed></div>
-        <div class="clinic-shell__composer">
-          <div class="clinic-shell__error" data-clinic-err hidden></div>
-          <div class="clinic-shell__composer-inner">
-            <textarea class="clinic-shell__textarea" rows="2" data-clinic-input placeholder="Напишите вопрос…"></textarea>
-            <button type="button" class="clinic-btn-send" data-clinic-send disabled aria-label="Отправить">➤</button>
+        <div class="clinic-shell__frame">
+          <div class="clinic-shell__surface">
+            <main class="clinic-shell__main" aria-label="Сообщения">
+              <header class="clinic-shell__header clinic-shell__header--glass">
+              <div class="clinic-shell__header-main">
+                <div class="clinic-shell__header-avatar">
+                  <span class="clinic-shell__avatar-fallback clinic-shell__avatar-fallback--header" data-clinic-header-fb>
+                    <img class="clinic-shell__avatar-fallback-img" alt="" width="48" height="48" data-clinic-header-avatar />
+                  </span>
+                  <span class="clinic-shell__header-online-dot" aria-hidden="true"></span>
+                </div>
+                <div class="clinic-shell__header-text">
+                  <span class="clinic-shell__header-name" data-clinic-header-name></span>
+                  <span class="clinic-shell__header-status" data-clinic-header-online></span>
+                </div>
+              </div>
+              <div class="clinic-shell__header-actions">
+                <button type="button" class="clinic-shell__header-close clinic-btn-icon clinic-btn-ghost" data-clinic-close title="Свернуть" aria-label="Свернуть чат">✕</button>
+              </div>
+            </header>
+              <div class="clinic-shell__feed" data-clinic-feed></div>
+            </main>
+            <form class="clinic-shell__composer" data-clinic-composer-form>
+              <div class="clinic-shell__error" data-clinic-err hidden></div>
+              <div class="clinic-shell__composer-inner">
+                <textarea class="clinic-shell__textarea" rows="1" data-clinic-input placeholder="Введите сообщение" aria-label="Введите сообщение"></textarea>
+                <button type="submit" class="clinic-btn-send" data-clinic-send disabled aria-label="Отправить сообщение">${SEND_BTN_SVG}</button>
+              </div>
+            </form>
           </div>
         </div>
       </div>
@@ -216,10 +422,9 @@ export function mountWidget(root, config) {
   const feed = root.querySelector("[data-clinic-feed]");
   const input = root.querySelector("[data-clinic-input]");
   const sendBtn = root.querySelector("[data-clinic-send]");
+  const composerForm = root.querySelector("[data-clinic-composer-form]");
   const errBox = root.querySelector("[data-clinic-err]");
-  const btnResetSession = root.querySelector("[data-clinic-reset-session]");
   const unreadDot = root.querySelector("[data-clinic-unread]");
-  const btnExpand = root.querySelector("[data-clinic-expand]");
   const btnClose = root.querySelector("[data-clinic-close]");
   const videoOverlay = root.querySelector("[data-clinic-video-overlay]");
   const videoTitle = root.querySelector("[data-clinic-video-title]");
@@ -240,6 +445,7 @@ export function mountWidget(root, config) {
   hAvatar.src = resolvedAvatarUrl;
 
   setOpen(false);
+  autoResizeTextarea(input);
 
   function getSid() {
     try {
@@ -268,10 +474,13 @@ export function mountWidget(root, config) {
 
   function resetSession() {
     if (state.pending) return;
+    clearWelcomeStream();
     clearStoredSid();
     state.messages = [];
     state.lastPayload = null;
     state.started = false;
+    state.welcomeAnimActive = false;
+    state.welcomeStreamDone = false;
     state.unread = false;
     unreadDot.classList.remove("is-visible");
     setError("");
@@ -290,14 +499,12 @@ export function mountWidget(root, config) {
       unreadDot.classList.remove("is-visible");
       input.focus();
     } else {
+      if (state.welcomeAnimActive) {
+        clearWelcomeStream();
+        state.welcomeAnimActive = false;
+      }
       launcher.focus();
     }
-  }
-
-  function setExpanded(on) {
-    state.isExpanded = on;
-    shell.classList.toggle("is-expanded", on);
-    btnExpand.setAttribute("aria-expanded", on ? "true" : "false");
   }
 
   function setError(msg) {
@@ -334,15 +541,15 @@ export function mountWidget(root, config) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "clinic-msg__link";
-      const arrow = document.createElement("span");
-      arrow.className = "clinic-msg__link-arrow";
-      arrow.setAttribute("aria-hidden", "true");
-      arrow.textContent = "→";
       const lab = document.createElement("span");
       lab.className = "clinic-msg__link-text";
       lab.textContent = it.label || it.ref;
-      btn.appendChild(arrow);
+      const chev = document.createElement("span");
+      chev.className = "clinic-msg__link-chevron";
+      chev.setAttribute("aria-hidden", "true");
+      chev.innerHTML = LINK_CHEVRON_SVG;
       btn.appendChild(lab);
+      btn.appendChild(chev);
       btn.addEventListener("click", () => {
         const target = state.messages[msgIndex];
         if (target && target.role === "bot") target.linksDismissed = true;
@@ -385,8 +592,8 @@ export function mountWidget(root, config) {
     if (sit && sit.show && sit.mode === "normal") {
       const sb = document.createElement("button");
       sb.type = "button";
-      sb.className = "clinic-turn__btn clinic-turn__btn--situation";
-      sb.textContent = "Рассказать о ситуации";
+      sb.className = "clinic-turn__btn clinic-turn__btn--cta-secondary";
+      sb.innerHTML = `<span class="clinic-turn__btn-icon">${CTA_CHAT_SVG}</span><span class="clinic-turn__btn-label">Рассказать о ситуации</span><span class="clinic-turn__btn-spacer" aria-hidden="true"></span>`;
       sb.addEventListener("click", () => {
         dismissTrailingsAll(state.messages);
         dismissLinksAll(state.messages);
@@ -411,8 +618,10 @@ export function mountWidget(root, config) {
     if (m.cta && m.cta.text) {
       const c = document.createElement("button");
       c.type = "button";
-      c.className = "clinic-turn__btn clinic-turn__btn--cta";
-      c.textContent = m.cta.text;
+      c.className = "clinic-turn__btn clinic-turn__btn--cta-primary";
+      const ctaLabel = (m.cta.text || "Записаться на консультацию").trim();
+      c.innerHTML = `<span class="clinic-turn__btn-icon">${CTA_CALENDAR_SVG}</span><span class="clinic-turn__btn-label"></span><span class="clinic-turn__btn-spacer" aria-hidden="true"></span>`;
+      c.querySelector(".clinic-turn__btn-label").textContent = ctaLabel;
       c.addEventListener("click", () => {
         dismissTrailingsAll(state.messages);
         dismissLinksAll(state.messages);
@@ -426,31 +635,93 @@ export function mountWidget(root, config) {
   }
 
   function renderFeed() {
+    const prevWelcome = feed.querySelector(".clinic-shell__welcome-screen");
+    const keepWelcome = prevWelcome && !state.started && !state.welcomeStreamDone;
+
+    if (keepWelcome && prevWelcome) {
+      prevWelcome.remove();
+    } else if (!state.started) {
+      clearWelcomeStream();
+      state.welcomeAnimActive = false;
+      state.welcomeStreamDone = false;
+    }
+
     feed.textContent = "";
     const typing = document.createElement("div");
     typing.className = "clinic-shell__typing";
     typing.setAttribute("aria-live", "polite");
 
-    if (!state.started) {
-      const w = document.createElement("p");
-      w.className = "clinic-shell__welcome";
-      w.textContent = config.welcomeText;
-      feed.appendChild(w);
-      const row = document.createElement("div");
-      row.className = "clinic-shell__starters";
+    if (keepWelcome && prevWelcome) {
+      feed.appendChild(prevWelcome);
+    } else if (!state.started) {
+      const screen = document.createElement("section");
+      screen.className = "clinic-shell__welcome-screen";
+      screen.setAttribute("aria-label", "Приветствие");
+
+      const card = document.createElement("section");
+      card.className = "clinic-shell__welcome-card";
+
+      const logoWrap = document.createElement("div");
+      logoWrap.className = "clinic-shell__welcome-logo-wrap";
+      logoWrap.setAttribute("aria-hidden", "true");
+
+      const logo = document.createElement("div");
+      logo.className = "clinic-shell__welcome-logo";
+      logo.innerHTML = WELCOME_LOGO_SVG;
+
+      for (const key of /** @type {const} */ (["one", "two", "three"])) {
+        const star = document.createElement("span");
+        star.className = `clinic-shell__welcome-star clinic-shell__welcome-star--${key}`;
+        star.innerHTML = WELCOME_STAR_SVG;
+        logoWrap.appendChild(star);
+      }
+      logoWrap.insertBefore(logo, logoWrap.firstChild);
+
+      const lead = document.createElement("div");
+      lead.className = "clinic-shell__welcome-lead";
+      const textP = document.createElement("p");
+      textP.className = "clinic-shell__welcome-text";
+      const textBody = document.createElement("span");
+      textBody.className = "clinic-shell__welcome-text-body";
+      const cursor = document.createElement("span");
+      cursor.className = "clinic-shell__stream-cursor";
+      cursor.setAttribute("aria-hidden", "true");
+      textP.appendChild(textBody);
+      textP.appendChild(cursor);
+      lead.appendChild(textP);
+
+      const wave = document.createElement("div");
+      wave.className = "clinic-shell__welcome-wave";
+      wave.setAttribute("aria-hidden", "true");
+
+      card.appendChild(logoWrap);
+      card.appendChild(lead);
+      card.appendChild(wave);
+
+      const actions = document.createElement("div");
+      actions.className = "clinic-shell__welcome-actions";
       for (const s of config.starterPrompts || []) {
         const b = document.createElement("button");
         b.type = "button";
-        b.className = "clinic-chip";
+        b.className = "clinic-shell__welcome-action";
         b.textContent = s.label;
         b.addEventListener("click", () => {
-          state.started = true;
-          input.value = s.q;
-          void sendFromComposer();
+          transitionFromWelcome(() => {
+            input.value = s.q;
+            void sendFromComposer();
+          });
         });
-        row.appendChild(b);
+        actions.appendChild(b);
       }
-      feed.appendChild(row);
+
+      screen.appendChild(card);
+      screen.appendChild(actions);
+      feed.appendChild(screen);
+
+      if (state.welcomeStreamDone) {
+        textBody.textContent = String(config.welcomeText || "").trim();
+        textP.classList.add("is-done");
+      }
     }
 
     state.messages.forEach((m, idx) => {
@@ -470,12 +741,6 @@ export function mountWidget(root, config) {
 
       const row = document.createElement("div");
       row.className = "clinic-row clinic-row--bot";
-      const av = document.createElement("img");
-      av.className = "clinic-row__avatar";
-      av.src = resolvedAvatarUrl;
-      av.alt = "";
-      av.width = 32;
-      av.height = 32;
       const bubble = document.createElement("div");
       bubble.className = "clinic-msg clinic-msg--bot";
       const body = document.createElement("div");
@@ -483,7 +748,7 @@ export function mountWidget(root, config) {
       body.textContent = m.text;
       bubble.appendChild(body);
       renderInlineLinks(bubble, m, idx);
-      row.appendChild(av);
+      row.appendChild(createBotAvatarEl(resolvedAvatarUrl));
       row.appendChild(bubble);
       wrap.appendChild(row);
       renderTrail(wrap, m, idx);
@@ -492,22 +757,32 @@ export function mountWidget(root, config) {
 
     const typingWrap = document.createElement("div");
     typingWrap.className = "clinic-shell__typing-wrap";
-    const typingAv = document.createElement("img");
-    typingAv.className = "clinic-row__avatar";
-    typingAv.src = resolvedAvatarUrl;
-    typingAv.alt = "";
-    typingAv.width = 32;
-    typingAv.height = 32;
     typing.textContent = "Бот печатает…";
-    typingWrap.appendChild(typingAv);
+    typingWrap.appendChild(createBotAvatarEl(resolvedAvatarUrl));
     typingWrap.appendChild(typing);
     typingWrap.classList.toggle("is-visible", state.pending);
     feed.appendChild(typingWrap);
 
-    feed.scrollTop = feed.scrollHeight;
-    if (btnResetSession) btnResetSession.disabled = state.pending;
+    scrollChatPaneToEnd(feed, { force: state.messages.length > 0 });
     syncComposerLeadUi();
     syncSendState();
+  }
+
+  /**
+   * @param {() => void} done
+   */
+  function transitionFromWelcome(done) {
+    const welcome = feed.querySelector(".clinic-shell__welcome-screen");
+    if (!welcome || state.started) {
+      done();
+      return;
+    }
+    welcome.classList.add("is-leaving");
+    window.setTimeout(() => {
+      state.started = true;
+      clearWelcomeStream();
+      done();
+    }, WELCOME_LEAVE_MS);
   }
 
   async function sendAsk(extra = {}) {
@@ -519,14 +794,29 @@ export function mountWidget(root, config) {
     delete apiFields._linkOnly;
 
     if (userEcho) {
-      state.started = true;
-      if (linkOnly) {
-        dismissTrailingsAll(state.messages);
+      const applyUserEcho = () => {
+        if (linkOnly) {
+          dismissTrailingsAll(state.messages);
+        } else {
+          dismissTrailingsAll(state.messages);
+          dismissLinksAll(state.messages);
+        }
+        state.messages.push({ role: "user", text: userEcho });
+      };
+      if (!state.started && feed.querySelector(".clinic-shell__welcome-screen")) {
+        await new Promise((resolve) => {
+          transitionFromWelcome(() => {
+            applyUserEcho();
+            resolve();
+          });
+        });
       } else {
-        dismissTrailingsAll(state.messages);
-        dismissLinksAll(state.messages);
+        if (!state.started) {
+          state.started = true;
+          clearWelcomeStream();
+        }
+        applyUserEcho();
       }
-      state.messages.push({ role: "user", text: userEcho });
     }
 
     const sid = getSid();
@@ -590,24 +880,24 @@ export function mountWidget(root, config) {
       return;
     }
 
-    dismissTrailingsAll(state.messages);
-    dismissLinksAll(state.messages);
+    const runSend = async () => {
+      dismissTrailingsAll(state.messages);
+      dismissLinksAll(state.messages);
+      state.messages.push({ role: "user", text: userBubbleText });
+      input.value = "";
+      autoResizeTextarea(input);
+      sendBtn.disabled = true;
+      setError("");
 
-    state.started = true;
-    state.messages.push({ role: "user", text: userBubbleText });
-    input.value = "";
-    sendBtn.disabled = true;
-    setError("");
+      const sid = getSid();
+      state.pending = true;
+      renderFeed();
 
-    const sid = getSid();
-    state.pending = true;
-    renderFeed();
+      let liveBubble = null;
+      let fullText = "";
+      let uiData = null;
 
-    let liveBubble = null;
-    let fullText = "";
-    let uiData = null;
-
-    await streamAsk(apiBase, { client_id: clientId, sid, q }, {
+      await streamAsk(apiBase, { client_id: clientId, sid, q }, {
       onDelta(delta) {
         fullText += delta;
         if (!liveBubble) liveBubble = _createLiveBubble(feed, resolvedAvatarUrl);
@@ -636,6 +926,19 @@ export function mountWidget(root, config) {
         syncSendState();
       },
     });
+    };
+
+    if (!state.started && feed.querySelector(".clinic-shell__welcome-screen")) {
+      transitionFromWelcome(() => {
+        void runSend();
+      });
+      return;
+    }
+    if (!state.started) {
+      state.started = true;
+      clearWelcomeStream();
+    }
+    await runSend();
   }
 
   function isLeadPhoneStep() {
@@ -647,7 +950,7 @@ export function mountWidget(root, config) {
     const phone = isLeadPhoneStep();
     input.inputMode = phone ? "numeric" : "text";
     input.classList.toggle("clinic-shell__textarea--phone", phone);
-    input.placeholder = phone ? "+7(900) 000-00-00" : "Напишите вопрос…";
+    input.placeholder = phone ? "+7(900) 000-00-00" : "Введите сообщение";
   }
 
   function onComposerInput() {
@@ -659,6 +962,7 @@ export function mountWidget(root, config) {
         input.selectionStart = input.selectionEnd = next.length;
       }
     }
+    autoResizeTextarea(input);
     syncSendState();
   }
 
@@ -677,14 +981,11 @@ export function mountWidget(root, config) {
   launcher.addEventListener("click", () => {
     setOpen(!state.isOpen);
     renderFeed();
+    if (state.isOpen) maybeStartWelcomeStream();
   });
 
   btnClose.addEventListener("click", () => {
     setOpen(false);
-  });
-
-  btnExpand.addEventListener("click", () => {
-    setExpanded(!state.isExpanded);
   });
 
   input.addEventListener("input", onComposerInput);
@@ -696,12 +997,9 @@ export function mountWidget(root, config) {
     }
   });
 
-  sendBtn.addEventListener("click", () => {
+  composerForm.addEventListener("submit", (ev) => {
+    ev.preventDefault();
     void sendFromComposer();
-  });
-
-  btnResetSession.addEventListener("click", () => {
-    resetSession();
   });
 
   videoClose.addEventListener("click", () => {
@@ -719,4 +1017,8 @@ export function mountWidget(root, config) {
   });
 
   renderFeed();
+
+  attachDevResetControl(resetSession);
+
+  return { resetSession };
 }

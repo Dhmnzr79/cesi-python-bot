@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Виджет — локальный тест</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="widget/widget.css">
   <style>
     .page-host {
@@ -29,6 +31,10 @@
       <strong>http://127.0.0.1:9000/static/widget-test.html</strong>
       — тогда <code>POST /ask</code> пойдёт на тот же origin (поле <code>apiBase</code> в конфиге пустое).
     </p>
+    <p>
+      <strong>Разработка:</strong> сброс сессии — кнопка <strong>DEV · сброс sid</strong> слева сверху или
+      <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd>.
+    </p>
     <p>Если <code>client_id</code> не <code>default</code>, поправь JSON в <code>#clinic-widget-config</code> под свой <code>ALLOWED_CLIENTS</code>.</p>
     <p>
       Для наглядного <strong>сырого JSON</strong> и <strong>кандидатов retrieval</strong> (как в старом тестере) открой отдельную dev-страницу:
@@ -42,9 +48,9 @@
     "apiBase": "",
     "clientId": "default",
     "avatarUrl": "/static/avatar.png",
-    "botName": "Помощник",
-    "onlineLabel": "Онлайн 24/7",
-    "welcomeText": "Задайте вопрос по лечению или выберите тему ниже.",
+    "botName": "Надежда",
+    "onlineLabel": "ИИ-консультант ЦЭСИ. Онлайн 24/7",
+    "welcomeText": "Здравствуйте!\nЯ ИИ-консультант клиники ЦЭСИ. Задайте вопрос по лечению или выберите тему ниже.",
     "starterPrompts": [
       { "label": "Это больно?", "q": "Больно ли делать имплантацию?" },
       { "label": "Сколько стоит?", "q": "Сколько стоит имплантация?" },
