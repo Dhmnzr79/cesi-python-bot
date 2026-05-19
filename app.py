@@ -36,7 +36,13 @@ from lead_service import handle_lead
 from logging_setup import LOG_FILE, emit_bot_event, get_logger, make_request_context, log_json, redact_text
 from chunk_responder import respond_from_chunk, respond_from_chunk_stream
 from flow_handlers import handle_flows
-from llm import classify_handoff_filter, classify_intent
+from llm import classify_intent
+from ingress_gate import (
+    build_ingress_payload,
+    classify_ingress,
+    ingress_service_route,
+)
+from contracts.ingress_route import IngressRouteResult
 from resolver import maybe_start_shadow_resolver, resolve_with_fallback
 from arbiter import decide_content_route
 from content_arbiter import ContentCandidates, collect_content_candidates
@@ -84,7 +90,6 @@ from ux_builder import (
     internal_error_response,
     low_score_response,
     no_candidates_response,
-    offtopic_response,
     reset_session_response,
 )
 def _is_resolver_bypassed_env() -> bool:
@@ -354,46 +359,6 @@ def _rate_limited_response_payload() -> dict:
     }
 
 
-def _handoff_filter_payload(
-    sid: str,
-    client_id: str | None,
-    *,
-    reason: str,
-) -> dict:
-    no_cta_reasons = {
-        "spam",
-        "flood",
-        "trolling",
-        "abuse",
-        "offtopic",
-        "prompt_injection",
-        "acute_symptom",
-        "medical_advice",
-        "legal",
-    }
-    use_cta = (reason or "").strip().lower() not in no_cta_reasons
-    return {
-        "answer": (
-            "Понимаю. Такой вопрос лучше передать администратору, чтобы вам ответили "
-            "корректно и без лишних ожиданий. Оставьте, пожалуйста, контакт — "
-            "администратор свяжется с вами. Если ситуация срочная, пожалуйста, не ждите "
-            "ответа в чате — позвоните в клинику напрямую."
-        ),
-        "quick_replies": [],
-        "cta": {"text": "Связаться с администратором", "action": "lead"} if use_cta else None,
-        "video": None,
-        "situation": {"show": False, "mode": "normal"},
-        "offer": None,
-        "meta": {
-            "sid": sid,
-            "client_id": client_id,
-            "handoff_filter": True,
-            "handoff_label": "handoff",
-            "handoff_reason": (reason or "unspecified")[:64],
-        },
-    }
-
-
 def _is_obvious_noise(q: str) -> bool:
     s = (q or "").strip()
     if not s:
@@ -407,16 +372,16 @@ def _is_obvious_noise(q: str) -> bool:
     return False
 
 
-def _obvious_noise_payload(sid: str, client_id: str | None) -> dict:
-    return {
-        "answer": "Похоже, сообщение не распознано. Я помогу по вопросам клиники, записи, услуг и стоимости.",
-        "quick_replies": [],
-        "cta": None,
-        "video": None,
-        "situation": {"show": False, "mode": "normal"},
-        "offer": None,
-        "meta": {"sid": sid, "client_id": client_id, "obvious_noise": True},
-    }
+def _obvious_noise_ingress_result() -> IngressRouteResult:
+    return IngressRouteResult(
+        route="hard_stop_non_target",
+        confidence=1.0,
+        reason="obvious_noise",
+        policy_key=None,
+        requested_service=None,
+        source="rule",
+        is_urgent=False,
+    )
 
 
 def _norm_dup_text(q: str) -> str:
@@ -698,6 +663,9 @@ def _infer_route(payload: dict) -> str:
         return "low_score_fallback"
     if bool(meta.get("lead_flow")):
         return "lead_flow"
+    ingress_route = str(meta.get("ingress_route") or "").strip().lower()
+    if ingress_route and ingress_route != "normal":
+        return f"ingress_{ingress_route}"
     if bool(meta.get("handoff_filter")):
         return "handoff_filter"
     intent = str(meta.get("intent") or "").strip().lower()
@@ -1089,17 +1057,46 @@ def _orchestrate_ask_turn(data: dict):
         log_json(logger, 'rate_limited', sid=sid, client_id=client_id, ip=ip)
         return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_rate_limited_response_payload(), service_route='rate_limited', http_status=429)
     if _is_obvious_noise(q):
+        noise_res = _obvious_noise_ingress_result()
         log_json(logger, 'obvious_noise_short_circuit', sid=sid, client_id=client_id)
-        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_obvious_noise_payload(sid, client_id), service_doc_id=None, service_track_user=True, service_route='noise_short_circuit', decision_frame=_orch_decision_dump(decision))
-    if q:
-        hf = classify_handoff_filter(q, client_id=client_id, sid=sid)
-        label = str(hf.get('label') or '').lower()
-        reason = str(hf.get('reason') or 'unspecified').lower()
-        confidence = float(hf.get('confidence') or 0.0)
-        is_handoff = label == 'handoff'
-        log_json(logger, 'handoff_filter_gate', sid=sid, client_id=client_id, label=label, reason=reason[:64], confidence=round(confidence, 4), is_handoff=is_handoff)
-        if is_handoff:
-            return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=_handoff_filter_payload(sid=sid, client_id=client_id, reason=reason), service_doc_id=None, service_track_user=True, service_route='handoff_filter', decision_frame=_orch_decision_dump(decision))
+        return AskOrchestrationResult(
+            kind='service_reply',
+            q=q,
+            sid=sid,
+            client_id=client_id,
+            service_payload=build_ingress_payload(noise_res, sid=sid, client_id=client_id, question=q),
+            service_doc_id=None,
+            service_track_user=True,
+            service_route=ingress_service_route(noise_res),
+            decision_frame=_orch_decision_dump(decision),
+        )
+    ingress_skip = bool(ref)
+    if q and not ingress_skip:
+        ingress_res = classify_ingress(q, client_id=client_id, sid=sid, skip=False)
+        log_json(
+            logger,
+            'ingress_gate',
+            sid=sid,
+            client_id=client_id,
+            route=ingress_res.route,
+            reason=ingress_res.reason[:64],
+            confidence=round(float(ingress_res.confidence), 4),
+            source=ingress_res.source,
+        )
+        if ingress_res.route != 'normal':
+            return AskOrchestrationResult(
+                kind='service_reply',
+                q=q,
+                sid=sid,
+                client_id=client_id,
+                service_payload=build_ingress_payload(
+                    ingress_res, sid=sid, client_id=client_id, question=q
+                ),
+                service_doc_id=None,
+                service_track_user=True,
+                service_route=ingress_service_route(ingress_res),
+                decision_frame=_orch_decision_dump(decision),
+            )
     st = mem_get(sid)
     flow_result = handle_flows(data=data, st=st, sid=sid, q=q, client_id=client_id, txt=TXT, service_payload=_service_payload, get_last_content_ui_payload=_get_last_content_ui_payload_compat, get_topic_state=get_topic_state)
     if flow_result is not None:
@@ -1192,7 +1189,7 @@ def _orchestrate_ask_turn(data: dict):
             scope_topic_candidate = None
 
     qp_loc = normalize_retrieval_query(q) or (q or "")
-    if intent != 'offtopic' and (
+    if (
         contacts_intent(qp_loc.strip()) or contacts_intent((q or '').strip())
     ):
         intent = 'contacts'
@@ -1201,8 +1198,6 @@ def _orchestrate_ask_turn(data: dict):
         request.ctx['retrieval_scope_guard_reason'] = 'none'
         request.ctx['effective_intent'] = 'contacts'
 
-    if intent == 'offtopic':
-        return AskOrchestrationResult(kind='service_reply', q=q, sid=sid, client_id=client_id, service_payload=offtopic_response(), service_doc_id=None, service_track_user=True, service_route='offtopic', decision_frame=_orch_decision_dump(decision))
     if intent == 'contacts':
         # Contacts retrieval must stay full-corpus so clinic chunks aren't dropped by stale topic scope.
         cands = retrieve(q, topk=24, client_id=client_id, scope_topic=None)

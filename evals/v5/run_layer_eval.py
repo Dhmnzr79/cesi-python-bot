@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-LayerName = Literal["resolver", "arbiter", "verifier", "generator", "all"]
+LayerName = Literal["resolver", "arbiter", "verifier", "generator", "ingress", "all"]
 
 # Ensure project root is importable when running as a script.
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -431,6 +431,64 @@ def eval_verifier() -> EvalResult:
     )
 
 
+def eval_ingress() -> EvalResult:
+    cases = _load_json(_here("ingress_golden.json"))
+    try:
+        from core.clinic_policies_loader import match_clinic_policy_key
+        from ingress_gate import ingress_entity_offered
+    except Exception as e:
+        return EvalResult(
+            layer="ingress",
+            status="SKIP",
+            details={"cases": len(cases), "reason": f"ingress_import_failed: {str(e)[:200]}"},
+        )
+
+    total = 0
+    ok = 0
+    bad: list[dict[str, Any]] = []
+    client_id = "default"
+    for row in cases:
+        cid = str(row.get("id") or "")
+        q = str(row.get("question") or "")
+        mode = str(row.get("mode") or "policy_only")
+        total += 1
+        passed = False
+        if mode == "policy_only":
+            pk = match_clinic_policy_key(q, client_id)
+            exp_route = str(row.get("expected_route") or "")
+            exp_pk = str(row.get("expected_policy_key") or "")
+            passed = pk == exp_pk and exp_route == "not_offered_policy"
+            if not passed:
+                bad.append({"id": cid, "got_policy_key": pk, "expected_policy_key": exp_pk})
+        elif mode in ("catalog_check", "offered_check"):
+            offered = ingress_entity_offered(q, client_id)
+            want = bool(row.get("expected_offered"))
+            passed = offered == want
+            if not passed:
+                bad.append({"id": cid, "got_offered": offered, "expected_offered": want})
+        else:
+            bad.append({"id": cid, "reason": f"unknown_mode:{mode}"})
+            passed = False
+        if passed:
+            ok += 1
+
+    if total == 0:
+        return EvalResult(layer="ingress", status="SKIP", details={"cases": 0, "reason": "no_cases"})
+    acc = ok / total
+    status: Literal["OK", "FAIL"] = "OK" if acc >= 1.0 else "FAIL"
+    return EvalResult(
+        layer="ingress",
+        status=status,
+        details={
+            "cases": total,
+            "ok": ok,
+            "accuracy": round(acc, 4),
+            "note": "deterministic policy + catalog/doctor offered ground truth (no LLM)",
+            "bad_examples": bad[:25],
+        },
+    )
+
+
 def eval_generator() -> EvalResult:
     cases = _load_json(_here("generator_golden.json"))
     total = 0
@@ -481,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--layer",
         required=True,
-        choices=["resolver", "arbiter", "verifier", "generator", "all"],
+        choices=["resolver", "arbiter", "verifier", "generator", "ingress", "all"],
         help="Which layer eval to run.",
     )
     args = p.parse_args(argv)
@@ -496,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         results.append(eval_verifier())
     if layer in ("generator", "all"):
         results.append(eval_generator())
+    if layer in ("ingress", "all"):
+        results.append(eval_ingress())
 
     for r in results:
         _print_result(r)

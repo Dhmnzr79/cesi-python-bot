@@ -26,13 +26,6 @@
 
 ---
 
-## not_offered_services pattern (no architectural support)
+## not_offered_services pattern
 
-Клиника может явно НЕ предлагать определённые услуги (cesi: брекеты). Сейчас бот это не обрабатывает — может попасть в случайный документ или сгенерировать ответ про несуществующую услугу.
-
-**Кандидат на fix:** новая ветка в A1 hard gates после PR #1.3:
-
-- service_catalog.json: блок not_offered_services с aliases + template
-- В _orchestrate_ask_turn: после CONTACTS_RE → проверка not_offered match
-
-**Приоритет:** после PR #1.3–#1.4, до PR B (boosters).
+**Закрыто:** `ingress_gate.py` + `clients/{id}/clinic_policies.yaml` — policy-факты (дети/ОМС/ДМС) и `service_not_offered` с ground truth по `service_catalog.json`.

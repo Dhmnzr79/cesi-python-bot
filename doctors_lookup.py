@@ -18,6 +18,9 @@ _MD_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "md")
 _NAMES_INDEX_LOCK = threading.Lock()
 _NAMES_INDEX: dict[str, tuple[float, frozenset[str]]] = {}
 
+_GROUND_TRUTH_LOCK = threading.Lock()
+_GROUND_TRUTH_INDEX: dict[str, tuple[float, frozenset[str], frozenset[str]]] = {}
+
 # sentinel: в запросе нет ключевых слов из SPECIALTY_KEYWORDS
 _NO_SPECIALTY_KEYWORD = object()
 _OVERVIEW_ID = "doctors__doctor__overview"
@@ -301,6 +304,92 @@ def cached_doctor_name_substrings(*, client_id: str | None) -> frozenset[str]:
         phrases = _collect_client_doctor_name_phrases()
         _NAMES_INDEX[cid] = (mt, phrases)
         return phrases
+
+
+def _norm_ground_truth_text(text: str) -> str:
+    return (text or "").strip().lower().replace("ё", "е")
+
+
+def _build_doctor_ground_truth_index() -> tuple[frozenset[str], frozenset[str]]:
+    """Role phrases from position/aliases + specialty keys confirmed by doctor md."""
+    role_phrases: set[str] = set()
+    confirmed_kw: set[str] = set()
+    for path in _iter_doctor_paths():
+        fm, _body, _stem = _read_md_split(path)
+        if fm.get("active") is False:
+            continue
+        pos = _norm_ground_truth_text(str(fm.get("position") or ""))
+        alias_blob = " ".join(
+            _norm_ground_truth_text(str(a)) for a in (fm.get("aliases") or []) if str(a).strip()
+        )
+        blob = f"{pos} {alias_blob}".strip()
+        if "главный врач" in pos:
+            role_phrases.add("главный врач")
+        if pos:
+            for part in re.split(r"[,;]", pos):
+                for frag in re.split(r"[-–]", part):
+                    f = re.sub(r"\s+", " ", frag).strip()
+                    if len(f) >= 5:
+                        role_phrases.add(f)
+        for kw in SPECIALTY_KEYWORDS:
+            if kw in blob:
+                confirmed_kw.add(kw)
+    return frozenset(role_phrases), frozenset(confirmed_kw)
+
+
+def cached_doctor_ground_truth_index(
+    *, client_id: str | None
+) -> tuple[frozenset[str], frozenset[str]]:
+    """(role_phrases, confirmed_specialty_keywords) cached by md mtime."""
+    cid = _safe_client_id(client_id)
+    mt = _doctor_paths_mtime_max()
+    with _GROUND_TRUTH_LOCK:
+        hit = _GROUND_TRUTH_INDEX.get(cid)
+        if hit is not None and hit[0] == mt:
+            return hit[1], hit[2]
+        role_phrases, confirmed_kw = _build_doctor_ground_truth_index()
+        _GROUND_TRUTH_INDEX[cid] = (mt, role_phrases, confirmed_kw)
+        return role_phrases, confirmed_kw
+
+
+def catalog_has_active_topic(topic: str, *, client_id: str | None) -> bool:
+    """True if service_catalog has an active entry for this topic prefix."""
+    tnorm = str(topic or "").strip().lower()
+    if not tnorm:
+        return False
+    catalog = _read_service_catalog(client_id)
+    for _sid, entry in catalog.items():
+        if not isinstance(entry, dict) or entry.get("active") is False:
+            continue
+        et = _infer_entry_topic(entry)
+        if et == tnorm:
+            return True
+    return False
+
+
+def doctor_ground_truth_mention(text: str, *, client_id: str | None) -> bool:
+    """
+    True if question mentions a doctor name, confirmed role, or specialty backed by
+    doctors md and/or active catalog topic (ingress ground truth only; not routing).
+    """
+    low = _norm_ground_truth_text(text)
+    if not low:
+        return False
+    for phrase in cached_doctor_name_substrings(client_id=client_id):
+        if len(phrase) >= 3 and phrase in low:
+            return True
+    role_phrases, confirmed_kw = cached_doctor_ground_truth_index(client_id=client_id)
+    for phrase in role_phrases:
+        if len(phrase) >= 4 and phrase in low:
+            return True
+    for kw, topic in SPECIALTY_KEYWORDS.items():
+        if kw not in low:
+            continue
+        if kw in confirmed_kw:
+            return True
+        if topic and catalog_has_active_topic(topic, client_id=client_id):
+            return True
+    return False
 
 
 def load_all_doctors() -> list[DoctorPublic]:

@@ -30,6 +30,7 @@ PRICE_INTENT_LLM_MODEL = (os.getenv("PRICE_INTENT_LLM_MODEL") or "").strip() or 
 SAFETY_CLASSIFY_MODEL = (os.getenv("MODEL_SAFETY_CLASSIFY") or "").strip() or "gpt-5.4-nano"
 SAFETY_RED_CONFIDENCE_THRESHOLD = float(os.getenv("SAFETY_RED_CONFIDENCE_THRESHOLD", "0.8"))
 COMPLAINT_CLASSIFY_MODEL = (os.getenv("MODEL_COMPLAINT_CLASSIFY") or "").strip() or "gpt-5.4-nano"
+INGRESS_CLASSIFY_MODEL = (os.getenv("MODEL_INGRESS_CLASSIFY") or "").strip() or "gpt-5.4-nano"
 QUERY_REWRITE_ON = os.getenv("QUERY_REWRITE_ON", "1").lower() in ("1", "true", "yes")
 QUERY_REWRITE_MAX_MESSAGES = int(os.getenv("QUERY_REWRITE_MAX_MESSAGES", "10"))
 # Подстроки в ответе rewrite → отбросить (утечка инструкции / мусор). Разделитель |

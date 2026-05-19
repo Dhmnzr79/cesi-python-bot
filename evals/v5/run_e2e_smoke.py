@@ -93,6 +93,10 @@ def _infer_route_from_response(resp: dict[str, Any]) -> str:
     if orch == "price_concern":
         return "price_concern"
 
+    ingress_route = str(meta.get("ingress_route") or "").strip().lower()
+    if ingress_route and ingress_route != "normal":
+        return f"ingress_{ingress_route}"
+
     # Explicit meta flags first.
     if bool(meta.get("handoff_filter")):
         return "handoff_filter"

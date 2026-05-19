@@ -1,3 +1,9 @@
+ingress:
+  min_confidence:
+    hard_stop_non_target: 0.65
+    manual_contact: 0.65
+    service_not_offered: 0.65
+
 resolver:
   min_confidence:
     intent: 0.7

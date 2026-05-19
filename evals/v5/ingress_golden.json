@@ -1,0 +1,71 @@
+[
+  {
+    "id": "ingress_policy_pediatric",
+    "question": "Есть детский стоматолог?",
+    "mode": "policy_only",
+    "expected_route": "not_offered_policy",
+    "expected_policy_key": "no_pediatric_dentistry"
+  },
+  {
+    "id": "ingress_policy_oms",
+    "question": "Можно лечиться по ОМС?",
+    "mode": "policy_only",
+    "expected_route": "not_offered_policy",
+    "expected_policy_key": "no_oms"
+  },
+  {
+    "id": "ingress_policy_dms",
+    "question": "Принимаете по ДМС?",
+    "mode": "policy_only",
+    "expected_route": "not_offered_policy",
+    "expected_policy_key": "no_dms"
+  },
+  {
+    "id": "ingress_catalog_implant_offered",
+    "question": "сколько стоит имплант",
+    "mode": "offered_check",
+    "expected_offered": true
+  },
+  {
+    "id": "ingress_catalog_braces_not_offered",
+    "question": "ставите брекеты",
+    "mode": "offered_check",
+    "expected_offered": false
+  },
+  {
+    "id": "ingress_doctor_implantologist",
+    "question": "Можно записаться к имплантологу?",
+    "mode": "offered_check",
+    "expected_offered": true
+  },
+  {
+    "id": "ingress_doctor_surgeon",
+    "question": "У вас есть хирург?",
+    "mode": "offered_check",
+    "expected_offered": true
+  },
+  {
+    "id": "ingress_doctor_chief",
+    "question": "Есть ли главный врач?",
+    "mode": "offered_check",
+    "expected_offered": true
+  },
+  {
+    "id": "ingress_doctor_orthodontist_topic",
+    "question": "Есть ли у вас ортодонт?",
+    "mode": "offered_check",
+    "expected_offered": true
+  },
+  {
+    "id": "ingress_doctor_name_khan",
+    "question": "Можно к Хану?",
+    "mode": "offered_check",
+    "expected_offered": true
+  },
+  {
+    "id": "ingress_periodontist_not_offered",
+    "question": "Есть ли у вас пародонтолог?",
+    "mode": "offered_check",
+    "expected_offered": false
+  }
+]

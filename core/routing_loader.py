@@ -9,6 +9,20 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
+class IngressMinConfidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    hard_stop_non_target: float = Field(..., ge=0.0, le=1.0)
+    manual_contact: float = Field(..., ge=0.0, le=1.0)
+    service_not_offered: float = Field(..., ge=0.0, le=1.0)
+
+
+class IngressThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min_confidence: IngressMinConfidence
+
+
 class ResolverMinConfidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,6 +95,7 @@ class Thresholds(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    ingress: IngressThresholds
     resolver: ResolverThresholds
     arbiter: ArbiterThresholds
     verifier: VerifierThresholds

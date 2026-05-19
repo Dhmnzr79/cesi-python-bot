@@ -946,6 +946,7 @@ _HANDOFF_SPAM_HINT_RE = re.compile(
 
 
 def classify_handoff_filter(user_message: str, *, client_id: str | None, sid: str) -> dict:
+    # DEPRECATED — replaced by ingress_gate.classify_ingress(), see DEPRECATED.md
     msg = (user_message or "").strip()
     if len(msg) < 2:
         return {

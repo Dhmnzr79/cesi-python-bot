@@ -242,25 +242,40 @@
       "question": "А брекеты делаете?",
       "must_contain": ["элайнер"],
       "must_not_contain": ["да, делаем брекеты", "ставим брекеты"],
-      "expected_route_any": ["retrieval_chunk", "guided"],
-      "comment": "Клиент cesi не предлагает брекеты (only элайнеры). Бот должен либо упомянуть элайнеры (через orthodontics__service__aligners.md), либо честно отказать. Без галлюцинации про брекеты как услугу клиники.",
-      "coverage_class": "WEAK"
+      "expected_route": "ingress_service_not_offered",
+      "comment": "Брекеты не в каталоге — ingress service_not_offered + alternative элайнеры.",
+      "coverage_class": "STRONG"
     },
-
+    {
+      "id": "smoke_ingress_pediatric",
+      "question": "Есть ли у вас детский стоматолог?",
+      "expected_route": "ingress_not_offered_policy",
+      "must_contain": ["взросл"],
+      "must_not_contain": ["есть детский стоматолог", "принимаем детей"],
+      "coverage_class": "STRONG"
+    },
+    {
+      "id": "smoke_ingress_oms",
+      "question": "Вы работаете по ОМС?",
+      "expected_route": "ingress_not_offered_policy",
+      "must_contain": ["омс"],
+      "must_not_contain": ["работаем по омс", "принимаем по омс"],
+      "coverage_class": "STRONG"
+    },
     {
       "id": "smoke_handoff_weather",
       "question": "Какая погода сегодня?",
-      "expected_route": "guided",
+      "expected_route": "ingress_hard_stop_non_target",
       "must_contain": [],
-      "comment": "handoff candidate (weather) — сейчас уходит в guided",
+      "comment": "offtopic — ingress hard stop, не guided",
       "coverage_class": "TEMPLATE"
     },
     {
       "id": "smoke_handoff_politics",
       "question": "Что думаете о политике?",
-      "expected_route": "guided",
+      "expected_route": "ingress_hard_stop_non_target",
       "must_contain": [],
-      "comment": "handoff candidate (politics) — сейчас уходит в guided",
+      "comment": "offtopic — ingress hard stop",
       "coverage_class": "TEMPLATE"
     },
 

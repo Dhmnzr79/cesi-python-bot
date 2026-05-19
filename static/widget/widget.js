@@ -8,6 +8,7 @@ const WELCOME_STREAM_START_MS = 280;
 const WELCOME_LEAVE_MS = 240;
 const TEXTAREA_MAX_HEIGHT = 112;
 const SCROLL_NEAR_BOTTOM_PX = 80;
+const TURN_SCROLL_TOP_GAP_PX = 12;
 
 const SEND_BTN_SVG = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
@@ -205,6 +206,38 @@ function scrollChatPaneToEnd(feedEl, opts = {}) {
     if (dist >= SCROLL_NEAR_BOTTOM_PX) return;
   }
   scroller.scrollTop = scroller.scrollHeight;
+}
+
+/**
+ * Скроллит так, чтобы начало последнего bot-turn'а было видно сверху,
+ * учитывая высоту липкой шапки внутри scroller'а.
+ * @param {HTMLElement} feedEl
+ */
+function scrollToLastTurnStart(feedEl) {
+  const scroller = feedEl.closest(".clinic-shell__main");
+  if (!scroller) return;
+  const turns = feedEl.querySelectorAll(".clinic-turn");
+  const last = turns[turns.length - 1];
+  if (!last) {
+    scroller.scrollTop = scroller.scrollHeight;
+    return;
+  }
+  const header = scroller.querySelector(".clinic-shell__header--glass");
+  const headerH = header ? header.getBoundingClientRect().height : 0;
+  const turnRect = last.getBoundingClientRect();
+  const scrollerRect = scroller.getBoundingClientRect();
+  const effectiveViewH = scroller.clientHeight - headerH;
+
+  if (turnRect.height + TURN_SCROLL_TOP_GAP_PX > effectiveViewH) {
+    const target =
+      scroller.scrollTop +
+      (turnRect.top - scrollerRect.top) -
+      headerH -
+      TURN_SCROLL_TOP_GAP_PX;
+    scroller.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+  } else {
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
+  }
 }
 
 function _updateLiveBubble(row, text, feed) {
@@ -763,7 +796,14 @@ export function mountWidget(root, config) {
     typingWrap.classList.toggle("is-visible", state.pending);
     feed.appendChild(typingWrap);
 
-    scrollChatPaneToEnd(feed, { force: state.messages.length > 0 });
+    const lastMsg = state.messages.length
+      ? state.messages[state.messages.length - 1]
+      : null;
+    if (lastMsg && lastMsg.role === "bot") {
+      requestAnimationFrame(() => scrollToLastTurnStart(feed));
+    } else {
+      scrollChatPaneToEnd(feed, { force: state.messages.length > 0 });
+    }
     syncComposerLeadUi();
     syncSendState();
   }

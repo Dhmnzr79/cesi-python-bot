@@ -25,6 +25,8 @@
 |---|---|---|---|---|
 | `llm.py:classify_intent` | `llm.py:971` | `resolver.py:resolve_with_fallback()` + запись trace в `pg_sink` из `app.py` | PR #1.2 | PR #2.1 |
 | `query_selector.py:select_catalog_content_route` | `query_selector.py:select_catalog_content_route` | `source_routing.route_source` + `content_arbiter.collect_content_candidates` hint | PR #1.3 | PR #2.1 |
+| `llm.py:classify_handoff_filter` | `llm.py:948` | `ingress_gate.classify_ingress()` | ingress PR | PR #2.1 |
+| `ux_builder.py:offtopic_response` + `app.py` intent==offtopic | — | `ingress_gate` hard_stop / ingress LLM | ingress PR | PR #2.1 |
 
 ---
 
